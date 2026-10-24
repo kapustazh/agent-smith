@@ -56,9 +56,10 @@ class SandboxConfig(BaseModel):
         "array", "cmath",])
     allowed_directories: list[str] = Field(
         default_factory=lambda: ["/testbed", "/tmp/agent"])
-    max_execution_time_seconds: int = 30
-    max_memory_mb: int = 512
-    max_output_chars: int = 9000
+    max_execution_time_seconds: int = Field(default=30, gt=0, strict=True)
+    max_memory_mb: int = Field(default=512, gt=0, strict=True)
+    max_output_chars: int = Field(default=9000, gt=0, strict=True)
+    max_output_bytes: int = Field(default=8192, gt=0, strict=True)
 
 
 # --- for MBPP and

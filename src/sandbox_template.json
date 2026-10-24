@@ -27,5 +27,6 @@
   ],
   "max_execution_time_seconds": 30,
   "max_memory_mb": 512,
-  "max_output_chars": 5000
+  "max_output_chars": 5000,
+  "max_output_bytes": 8192
 }

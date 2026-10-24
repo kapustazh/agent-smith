@@ -1,0 +1,8 @@
+{
+  "name": "agent-smith-mbpp-runtime",
+  "private": true,
+  "description": "Offline Python 3.10 WebAssembly files for the Deno executor",
+  "dependencies": {
+    "pyodide": "0.21.3"
+  }
+}

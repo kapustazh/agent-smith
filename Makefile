@@ -88,6 +88,9 @@ fclean: clean
 
 lint: flake8 mypy
 
+test:
+	uv run --frozen python -m unittest discover -s tests -v
+
 format:
 	git ls-files -z -- '*.py' | xargs -0 uv --no-config tool run \
 	--from autopep8==2.3.2 autopep8 --ignore-local-config \
@@ -110,6 +113,6 @@ lint-strict: flake8
 	--strict --explicit-package-bases --follow-imports=silent
 
 
-.PHONY: install run debug clean format lint lint-strict flake8 mypy fclean runapi check-venv venv
+.PHONY: install run debug clean format lint lint-strict flake8 mypy test fclean runapi check-venv venv
 
 #  ln -s ~/goinfre/uv uv

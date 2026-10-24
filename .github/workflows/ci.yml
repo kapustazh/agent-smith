@@ -66,7 +66,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        check: [flake8, mypy]
+        check: [flake8, mypy, test]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -78,6 +78,9 @@ jobs:
           python-version: "3.11"
       - name: Install locked dependencies
         run: uv sync --locked
+      - name: Install offline MBPP runtime assets
+        if: matrix.check == 'test'
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Run ${{ matrix.check }}
         id: check
         run: make ${{ matrix.check }}
