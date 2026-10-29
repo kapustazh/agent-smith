@@ -58,6 +58,16 @@ class RepositoryCase(unittest.TestCase):
             self.tools.read_file("x" * 500)
         self.assertLessEqual(len(str(caught.exception)), 40)
 
+    def test_container_paths_map_to_private_workspace(self) -> None:
+        self.tools.visible_root = Path("/testbed")
+        self.assertEqual(self.tools.read_file("/testbed/module.py", 1, 1),
+                         "1: def solve(value):")
+        outputs = (self.tools.list_files(), self.tools.search_code("solve"),
+                   self.tools.find_references("solve", "module.py", 1))
+        for output in outputs:
+            self.assertIn("/testbed/", output)
+            self.assertNotIn(str(self.repo), output)
+
     def test_exact_edit_preserves_newlines_and_permissions(self) -> None:
         path = self.repo / "windows.py"
         path.write_bytes(b"def f():\r\n    return 1\r\n")

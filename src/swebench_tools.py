@@ -21,8 +21,12 @@ SKIP_DIRECTORIES = {".git", ".venv", "venv", "node_modules", "__pycache__"}
 
 class RepositoryTools:
 
-    def __init__(self, root: Path | None, config: SandboxConfig) -> None:
+    def __init__(
+        self, root: Path | None, config: SandboxConfig,
+        visible_root: Path | None = None,
+    ) -> None:
         self._root = root
+        self.visible_root = visible_root
         self.config = config
         self._edit_lock = Lock()
 
@@ -47,7 +51,7 @@ class RepositoryTools:
         path = Path(value)
         if path.is_absolute():
             try:
-                path = path.relative_to(self.root)
+                path = path.relative_to(self.visible_root or self.root)
             except ValueError:
                 raise self._error(
                     "Path must be inside TESTBED_PATH.") from None
@@ -217,7 +221,7 @@ class RepositoryTools:
 
     def list_files(self, directory: str = ".", pattern: str = "*") -> str:
         return self._render(
-            (str(self.root / path)
+            (str((self.visible_root or self.root) / path)
              for path in self._files(directory, pattern)),
             "No matching files.",
         )
@@ -242,7 +246,9 @@ class RepositoryTools:
                             if "\x00" not in line and expression.search(
                                 line, timeout=remaining,
                             ):
-                                yield (f"{self.root / path}:{number} " +
+                                filename = (
+                                    self.visible_root or self.root) / path
+                                yield (f"{filename}:{number} " +
                                        line.rstrip("\r\n"))
                     except UnicodeError:
                         continue
@@ -272,7 +278,8 @@ class RepositoryTools:
                     if isinstance(node, (
                         ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
                     )) and node.name == name:
-                        yield (f"{self.root / path}:{node.lineno} " +
+                        yield (f"{(self.visible_root or self.root) / path}"
+                               f":{node.lineno} " +
                                lines[node.lineno - 1])
             if skipped:
                 yield f"[Skipped {skipped} non-UTF-8 or invalid Python files.]"
@@ -358,6 +365,7 @@ class RepositoryTools:
                     lines = (snapshot / relative).read_text(
                         encoding="utf-8",
                     ).splitlines()
-                    yield (f"{self.root / relative}:{number} " +
+                    yield (f"{(self.visible_root or self.root) / relative}"
+                           f":{number} " +
                            lines[number - 1])
             return self._render(results(), "No references found.")
