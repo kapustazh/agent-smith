@@ -1,11 +1,16 @@
+import ast
 from contextlib import contextmanager
+import fnmatch
 import os
 from pathlib import Path
 import stat
 from threading import Lock
 from typing import Iterable, Iterator, TextIO
+from uuid import uuid4
 from fastmcp.exceptions import ToolError
 from src.config_model import SandboxConfig
+
+SKIP_DIRECTORIES = {".git", ".venv", "venv", "node_modules", "__pycache__"}
 
 
 class RepositoryTools:
@@ -127,3 +132,86 @@ class RepositoryTools:
                 return self._render(lines(), "No lines in requested range.")
             except UnicodeError:
                 raise self._error("File is not UTF-8 text.") from None
+
+    def edit_file(self, filepath: str, old_str: str, new_str: str) -> str:
+        if not old_str:
+            raise self._error("old_str must not be empty.")
+        try:
+            new_str.encode("utf-8")
+        except UnicodeError:
+            raise self._error("new_str must be valid UTF-8 text.") from None
+        with self._edit_lock, self._file(
+            self._relative(filepath), edit=True,
+        ) as handle:
+            try:
+                source = handle.read()
+            except UnicodeError:
+                raise self._error("File is not UTF-8 text.") from None
+            first = source.find(old_str)
+            if first < 0 or source.find(old_str, first + 1) >= 0:
+                raise self._error(
+                    "Expected one exact match; found none or multiple. "
+                    "File unchanged; include more context.",
+                )
+            path = self._relative(filepath)
+            updated = source.replace(old_str, new_str, 1)
+            message = "Replaced one occurrence."
+            if path.suffix in (".py", ".pyi"):
+                try:
+                    ast.parse(updated)
+                except (SyntaxError, ValueError) as error:
+                    message += (" File saved, but Python syntax is invalid: "
+                                f"{error}")
+            with self._directory(path.parent) as directory:
+                temporary = ".agent-edit-" + uuid4().hex
+                descriptor = os.open(
+                    temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600, dir_fd=directory,
+                )
+                try:
+                    with os.fdopen(descriptor, "w", encoding="utf-8",
+                                   newline="") as replacement:
+                        os.fchmod(replacement.fileno(), stat.S_IMODE(
+                            os.fstat(handle.fileno()).st_mode,
+                        ))
+                        replacement.write(updated)
+                    os.replace(temporary, path.name, src_dir_fd=directory,
+                               dst_dir_fd=directory)
+                finally:
+                    try:
+                        os.unlink(temporary, dir_fd=directory)
+                    except FileNotFoundError:
+                        pass
+        return message[:self.config.max_output_chars]
+
+    def _files(self, directory: str, pattern: str) -> Iterator[Path]:
+        path = self._relative(directory)
+        if not pattern or Path(pattern).is_absolute() or ".." in (
+            Path(pattern).parts
+        ):
+            raise self._error("Supply a relative glob pattern, e.g. '*.py'.")
+        with self._directory(path) as descriptor:
+            for current, directories, files, current_fd in os.fwalk(
+                ".", follow_symlinks=False, dir_fd=descriptor,
+            ):
+                directories[:] = sorted(
+                    name for name in directories
+                    if name not in SKIP_DIRECTORIES
+                )
+                for name in sorted(files):
+                    relative = Path(current) / name
+                    if not (fnmatch.fnmatchcase(name, pattern) or
+                            relative.match(pattern)):
+                        continue
+                    info = os.stat(
+                        name, dir_fd=current_fd, follow_symlinks=False,
+                    )
+                    if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                        yield path / relative
+
+    def list_files(self, directory: str = ".", pattern: str = "*") -> str:
+        return self._render(
+            (str(self.root / path)
+             for path in self._files(directory, pattern)),
+            "No matching files.",
+        )
