@@ -143,7 +143,11 @@ TESTBED_PATH=/absolute/path/to/repo uv run python mcp_tools_swebench.py
 ```
 
 Six tools provide file reads/edits, listing, search, definitions and references.
-Docker execution and patch generation are not implemented yet.
+For all nine tools, pull the task's `docker_image`, then start with
+`uv run python mcp_tools_swebench.py --task-file cache/swebench_task.json`.
+Docker uses a private `/testbed` copy, shared config limits and no network.
+`run_tests` returns script logs/exit code, not a benchmark verdict.
+Run `make test-docker` for real container, patch and cleanup checks.
 
 ## Resources
 - MBPP (Mostly Basic Python Problems) benchmark:

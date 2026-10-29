@@ -84,7 +84,11 @@ jobs:
         run: make install
       - name: Run ${{ matrix.check }}
         id: check
-        run: make ${{ matrix.check }}
+        run: |
+          make ${{ matrix.check }}
+          if [ "${{ matrix.check }}" = "test" ]; then
+            make test-docker
+          fi
       # Bot pushes may not start another workflow; report on the commit checked.
       - name: Report result on formatting commit
         if: ${{ always() && needs.format.outputs.changed == 'true' }}

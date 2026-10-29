@@ -1,17 +1,25 @@
 import asyncio
 import json
 import os
+from pathlib import Path
 import shlex
+import socket
+import sys
 import tempfile
 import unittest
+
 from fastmcp import Client
+from fastmcp.client.transports import StdioTransport
 from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
+
 from mcp_tools_swebench import create_server
 from src.config_model import SandboxConfig, SWEBenchTaskInput
 from src.swebench_docker import DockerSession
+from src.docker_process import capture
 
 
+ROOT = Path(__file__).resolve().parents[1]
 IMAGE = os.environ.get("SWE_DOCKER_TEST_IMAGE", "")
 EVAL = ("cd /testbed\n"
         "python -c 'from calc import add; assert add(2, 3) == 5'\n"
@@ -27,7 +35,6 @@ def task_input() -> SWEBenchTaskInput:
 
 @unittest.skipUnless(IMAGE, "Run make test-docker for Docker checks.")
 class DockerTests(unittest.IsolatedAsyncioTestCase):
-
     async def asyncSetUp(self) -> None:
         self.config = SandboxConfig(max_memory_mb=64,
                                     max_execution_time_seconds=2)
@@ -138,7 +145,6 @@ class DockerTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(IMAGE, "Run make test-docker for Docker checks.")
 class DockerMCPTests(unittest.IsolatedAsyncioTestCase):
-
     async def check_client(self, client: Client) -> None:
         async with client:
             tools = await client.list_tools()
@@ -162,3 +168,65 @@ class DockerMCPTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_in_process_lifecycle(self) -> None:
         await self.check_client(Client(create_server(task=task_input())))
+
+    async def test_stdio_lifecycle(self) -> None:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as task:
+            task.write(task_input().model_dump_json())
+            task.flush()
+            await self.check_client(Client(StdioTransport(
+                command=sys.executable,
+                args=[str(ROOT / "mcp_tools_swebench.py"),
+                      "--task-file", task.name],
+                cwd=str(ROOT),
+            )))
+
+    async def test_http_sigterm_cleans_up_container(self) -> None:
+        before = await capture([
+            "docker", "ps", "-aq", "--filter", "name=smith-swe-",
+        ], 5, 4096)
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as task:
+            task.write(task_input().model_dump_json())
+            task.flush()
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, str(ROOT / "mcp_tools_swebench.py"),
+                "--task-file", task.name, "--transport", "http", "--port",
+                str(port), stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                for _ in range(200):
+                    try:
+                        _, writer = await asyncio.open_connection(
+                            "127.0.0.1", port,
+                        )
+                    except OSError:
+                        await asyncio.sleep(.05)
+                    else:
+                        writer.close()
+                        await writer.wait_closed()
+                        break
+                else:
+                    self.fail("Docker HTTP server did not start")
+                await self.check_client(Client(f"http://127.0.0.1:{port}/mcp"))
+            finally:
+                process.terminate()
+                await asyncio.wait_for(process.wait(), 10)
+        after = await capture([
+            "docker", "ps", "-aq", "--filter", "name=smith-swe-",
+        ], 5, 4096)
+        self.assertEqual(after.stdout, before.stdout)
+
+    async def test_startup_failure_cleans_up(self) -> None:
+        broken_task = task_input()
+        broken_task.docker_image = "python:3.10-slim"
+        session = DockerSession(broken_task, SandboxConfig())
+        try:
+            with self.assertRaises(ToolError):
+                await session.start()
+        finally:
+            await session.close()
+        self.assertFalse(session.root.exists())
+        self.assertEqual(session.containers, {})

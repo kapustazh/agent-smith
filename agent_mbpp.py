@@ -203,7 +203,7 @@ def main(
                 "role": "user",
                 "content": f"The task: {the_task.task_definition}\n"
                 f"Function definition: {the_task.function_definition}\n"
-                f"Tests: \n ```{'\n'.join(the_task.test_list)}```\n",
+                "Tests: \n ```" + "\n".join(the_task.test_list) + "```\n",
 
             },
          ]
