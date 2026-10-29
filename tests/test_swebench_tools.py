@@ -1,12 +1,22 @@
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import socket
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from fastmcp import Client
+from fastmcp.client.transports import StdioTransport
 from fastmcp.exceptions import ToolError
+from mcp.types import TextContent
+from mcp_tools_swebench import create_server
 from src.config_model import SandboxConfig
 from src.swebench_tools import RepositoryTools
+
+ROOT = Path(__file__).resolve().parents[1]
 
 SOURCE = ("def solve(value):\n"
           "    return value + 1\n"
@@ -215,3 +225,90 @@ class RepositoryCase(unittest.TestCase):
         output = self.tools.find_references("solve", "module.py", 1)
         self.assertIn("consumer.py:3 answer = calculate(2)", output)
         self.assertFalse(marker.exists())
+
+
+class MCPTests(unittest.IsolatedAsyncioTestCase):
+
+    async def asyncSetUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name).resolve()
+        (self.root / "module.py").write_text(SOURCE)
+
+    async def check_client(self, client: Client) -> None:
+        async with client:
+            tools = {tool.name: tool for tool in await client.list_tools()}
+            self.assertEqual(set(tools), {
+                "read_file", "edit_file", "list_files", "search_code",
+                "search_function_or_class_definition_in_code",
+                "find_references",
+            })
+            schema = tools["find_references"].input_schema
+            self.assertEqual(set(schema["required"]),
+                             {"name", "filepath", "line"})
+            for name, arguments, expected in (
+                ("list_files", {"directory": ".", "pattern": "*.py"},
+                 str(self.root / "module.py")),
+                ("read_file", {"filepath": "module.py", "start_line": 1,
+                               "end_line": 1}, "1: def solve(value):"),
+                ("edit_file", {"filepath": "module.py", "old_str": "value + 1",
+                               "new_str": "value + 2"}, "Replaced one"),
+                ("search_code", {"pattern": "value \\+ 2"}, "module.py:2"),
+                ("search_function_or_class_definition_in_code",
+                 {"name": "Worker"}, "module.py:4 class Worker:"),
+                ("find_references", {"name": "solve", "filepath": "module.py",
+                                     "line": 1}, "module.py:8 answer"),
+            ):
+                response = await client.call_tool(name, arguments)
+                self.assertFalse(response.is_error)
+                content = response.content[0]
+                assert isinstance(content, TextContent)
+                self.assertIn(expected, content.text)
+            response = await client.call_tool(
+                "read_file", {"filepath": "../secret"}, raise_on_error=False,
+            )
+            self.assertTrue(response.is_error)
+
+    async def test_in_process_tool_contract(self) -> None:
+        await self.check_client(Client(create_server(self.root)))
+
+    async def test_stdio_with_testbed_environment(self) -> None:
+        await self.check_client(Client(StdioTransport(
+            command=sys.executable, args=[str(ROOT / "mcp_tools_swebench.py")],
+            cwd=str(ROOT), env={"TESTBED_PATH": str(self.root)},
+        )))
+
+    async def test_http_transport(self) -> None:
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        process = subprocess.Popen(
+            [sys.executable, str(ROOT / "mcp_tools_swebench.py"),
+             "--transport", "http", "--port", str(port)], cwd=ROOT,
+            env={**os.environ, "TESTBED_PATH": str(self.root)},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            for _ in range(200):
+                if process.poll() is not None:
+                    self.fail("HTTP server exited during startup")
+                try:
+                    reader, writer = await asyncio.open_connection(
+                        "127.0.0.1", port,
+                    )
+                except OSError:
+                    await asyncio.sleep(0.05)
+                else:
+                    writer.close()
+                    await writer.wait_closed()
+                    break
+            else:
+                self.fail("HTTP server did not start")
+            await self.check_client(Client(f"http://127.0.0.1:{port}/mcp"))
+        finally:
+            process.terminate()
+            try:
+                await asyncio.to_thread(process.wait, timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                await asyncio.to_thread(process.wait)

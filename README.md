@@ -134,6 +134,17 @@ Tests require Deno and the installed npm assets; missing runtime dependencies fa
 explicitly. CI installs the assets and runs the real executor and MCP transport
 checks without Docker.
 
+### SWE-bench tools
+
+Set `TESTBED_PATH` to the repository to inspect. Start the server:
+
+```bash
+TESTBED_PATH=/absolute/path/to/repo uv run python mcp_tools_swebench.py
+```
+
+Six tools provide file reads/edits, listing, search, definitions and references.
+Docker execution and patch generation are not implemented yet.
+
 ## Resources
 - MBPP (Mostly Basic Python Problems) benchmark:
 	- https://mcpbr.org/mbpp
