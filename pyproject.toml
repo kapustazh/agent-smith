@@ -16,6 +16,8 @@ dependencies = [
 	"deno",
 	"openai",
 	"fastmcp",
+	"jedi>=0.19.2,<0.21",
+	"regex>=2024.11.6",
 #	"transformers>=4.40.0",
 #	"sentence_transformers>=5.7.0",
 #	"torch>=2.0.0",
