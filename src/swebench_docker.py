@@ -176,19 +176,15 @@ class DockerSession:
 
     async def get_patch(self) -> str:
         async with self.lock:
+            git = "git -c core.fileMode=false -c safe.directory=/testbed "
             script = (
                 "set -e\n"
                 "index=$(mktemp /tmp/smith-index.XXXXXX)\n"
                 "trap 'rm -f \"$index\" \"$index.lock\"' EXIT\n"
                 "export GIT_INDEX_FILE=$index\n"
-                "export GIT_CONFIG_COUNT=2\n"
-                "export GIT_CONFIG_KEY_0=safe.directory\n"
-                "export GIT_CONFIG_VALUE_0=/testbed\n"
-                "export GIT_CONFIG_KEY_1=core.fileMode\n"
-                "export GIT_CONFIG_VALUE_1=false\n"
-                f"git read-tree {self.base}\n"
-                "git add -A -- .\n"
-                f"git diff --cached --binary --no-ext-diff --no-textconv "
+                f"{git}read-tree {self.base}\n"
+                f"{git}add -A -- .\n"
+                f"{git}diff --cached --binary --no-ext-diff --no-textconv "
                 f"{self.base} --\n"
             )
             result = await self._execute(
