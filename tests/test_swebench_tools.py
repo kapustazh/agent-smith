@@ -185,3 +185,33 @@ class RepositoryCase(unittest.TestCase):
                        self.tools.list_files()):
             self.assertLessEqual(len(output), 80)
             self.assertIn("Output truncated", output)
+
+    def test_references_follow_aliases(self) -> None:
+        output = self.tools.find_references("solve", "module.py", 1)
+        self.assertIn("module.py:1 def solve(value):", output)
+        self.assertIn("module.py:8 answer = solve(1)", output)
+        self.assertIn("consumer.py:2 answer = calculate(2)", output)
+        self.assertNotIn("module.py:5", output)
+        (self.repo / "module.py").write_text(SOURCE + "solve(3)\n")
+        self.assertIn("module.py:9 solve(3)",
+                      self.tools.find_references("solve", "module.py", 1))
+
+    def test_references_reject_missing_or_ambiguous_symbols(self) -> None:
+        for name, line in (("solve", 0), ("absent", 1), ("solve", 99)):
+            with self.assertRaises(ToolError):
+                self.tools.find_references(name, "module.py", line)
+        (self.repo / "duplicate.py").write_text("f(f())\n# f\ntext = 'f'\n")
+        for line in (1, 2, 3):
+            with self.assertRaises(ToolError):
+                self.tools.find_references("f", "duplicate.py", line)
+
+    def test_analysis_never_runs_repository_code(self) -> None:
+        marker = self.root / "executed"
+        (self.repo / "consumer.py").write_text(
+            "from module import solve as calculate\n" +
+            f"open({str(marker)!r}, 'w').write('unsafe')\n" +
+            "answer = calculate(2)\n",
+        )
+        output = self.tools.find_references("solve", "module.py", 1)
+        self.assertIn("consumer.py:3 answer = calculate(2)", output)
+        self.assertFalse(marker.exists())

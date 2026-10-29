@@ -1,14 +1,18 @@
 import ast
 from contextlib import contextmanager
 import fnmatch
+import io
 import os
 from pathlib import Path
 import stat
+import tempfile
 from threading import Lock
 import time
+import tokenize
 from typing import Iterable, Iterator, TextIO
 from uuid import uuid4
 from fastmcp.exceptions import ToolError
+import jedi
 import regex
 from src.config_model import SandboxConfig
 
@@ -273,3 +277,87 @@ class RepositoryTools:
             if skipped:
                 yield f"[Skipped {skipped} non-UTF-8 or invalid Python files.]"
         return self._render(definitions(), "No definitions found.")
+
+    def find_references(self, name: str, filepath: str, line: int) -> str:
+        path = self._relative(filepath)
+        if not name.isidentifier() or line < 1:
+            raise self._error(
+                "Supply an identifier and a 1-based source line.")
+        with self._file(path) as handle:
+            try:
+                source = handle.read()
+                tokens = list(tokenize.generate_tokens(
+                    io.StringIO(source).readline,
+                ))
+            except (UnicodeError, tokenize.TokenError, IndentationError):
+                raise self._error("Cannot parse the supplied Python file.")
+        columns = [token.start[1] for token in tokens if
+                   token.type == tokenize.NAME and token.string == name and
+                   token.start[0] == line]
+        if len(columns) != 1:
+            raise self._error(
+                "The supplied line must contain exactly one occurrence "
+                "of the identifier outside comments and strings.",
+            )
+        # Jedi reads paths itself: give it a fresh copy of verified files only.
+        with tempfile.TemporaryDirectory(prefix="smith-references-") as folder:
+            snapshot = Path(folder).resolve()
+            aliases: list[tuple[Path, int, str]] = []
+            with self._edit_lock:
+                for candidate in self._files(".", "*"):
+                    if candidate.suffix not in (".py", ".pyi"):
+                        continue
+                    with self._file(candidate) as handle:
+                        try:
+                            text = handle.read()
+                        except UnicodeError:
+                            continue
+                    target = snapshot / candidate
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(text, encoding="utf-8")
+                    try:
+                        tree = ast.parse(text)
+                    except (SyntaxError, ValueError):
+                        continue
+                    aliases.extend((target, node.lineno, node.asname) for node
+                                   in ast.walk(tree) if isinstance(node,
+                                   ast.alias) and node.asname is not None)
+            project = jedi.Project(
+                str(snapshot), sys_path=[str(snapshot), str(snapshot / "src")],
+                smart_sys_path=False, load_unsafe_extensions=False,
+            )
+            script = jedi.Script(source, path=snapshot / path, project=project)
+            definitions = {(d.module_path, d.line, d.column) for d in
+                           script.goto(line, columns[0], follow_imports=True)}
+            references = script.get_references(
+                line=line, column=columns[0], include_builtins=False,
+            )
+            # Jedi searches one spelling at a time; include import aliases.
+            for filename, number, alias in aliases:
+                imported = jedi.Script(path=filename, project=project)
+                for symbol in imported.get_names(all_scopes=True):
+                    if symbol.name == alias and symbol.line == number and any(
+                        (d.module_path, d.line, d.column) in definitions
+                        for d in symbol.goto(follow_imports=True)
+                    ):
+                        references.extend(imported.get_references(
+                            number, symbol.column, include_builtins=False,
+                        ))
+            locations: set[tuple[Path, int]] = set()
+            for ref in references:
+                if ref.module_path is None or ref.line is None:
+                    continue
+                try:
+                    relative = ref.module_path.relative_to(snapshot)
+                except ValueError:
+                    continue
+                locations.add((relative, ref.line))
+
+            def results() -> Iterator[str]:
+                for relative, number in sorted(locations):
+                    lines = (snapshot / relative).read_text(
+                        encoding="utf-8",
+                    ).splitlines()
+                    yield (f"{self.root / relative}:{number} " +
+                           lines[number - 1])
+            return self._render(results(), "No references found.")
