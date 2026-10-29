@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -105,3 +106,82 @@ class RepositoryCase(unittest.TestCase):
                          str(self.repo / "pkg/extra.py"))
         self.assertEqual(self.tools.list_files(".", "absent*"),
                          "No matching files.")
+
+    def test_search_regex_globs_and_numbered_output(self) -> None:
+        (self.repo / "binary").write_bytes(b"\x00solve\xff\n")
+        self.assertEqual(self.tools.search_code(r"^def\s+solve", "*.py"),
+                         f"{self.repo}/module.py:1 def solve(value):")
+        self.assertEqual(self.tools.search_code("absent"), "No matches.")
+        with self.assertRaisesRegex(ToolError, "Invalid regular expression"):
+            self.tools.search_code("[")
+
+    def test_expensive_regex_times_out(self) -> None:
+        (self.repo / "long.txt").write_text("a" * 200000 + "!")
+        self.tools.config.max_execution_time_seconds = 1
+        with self.assertRaisesRegex(ToolError, "timed out"):
+            self.tools.search_code("(a+)+$", "long.txt")
+
+    def test_definitions_include_async(self) -> None:
+        (self.repo / "broken.py").write_text("def broken(:")
+        (self.repo / "comment.txt").write_text("def solve(): pass")
+        output = self.tools.search_function_or_class_definition_in_code(
+            "solve")
+        self.assertIn(f"{self.repo}/module.py:1 def solve(value):", output)
+        self.assertIn(f"{self.repo}/module.py:5     async def solve", output)
+        self.assertIn("Skipped 1", output)
+        self.assertNotIn("comment.txt", output)
+        self.assertIn("module.py:4 class Worker:",
+                      self.tools.search_function_or_class_definition_in_code(
+                          "Worker"))
+
+    def test_paths_are_confined(self) -> None:
+        outside = self.root / "secret.py"
+        outside.write_text("secret = 42\n")
+        for name in ("../secret.py", str(outside), ".git/config", ""):
+            with self.subTest(name=name):
+                with self.assertRaises(ToolError):
+                    self.tools.read_file(name)
+                with self.assertRaises(ToolError):
+                    self.tools.edit_file(name, "secret", "public")
+        with self.assertRaises(ToolError):
+            self.tools.list_files("..")
+        self.assertEqual(outside.read_text(), "secret = 42\n")
+
+    def test_links_and_special_files_are_rejected(self) -> None:
+        outside = self.root / "secret.py"
+        outside.write_text("secret = 42\n")
+        (self.repo / "link.py").symlink_to(outside)
+        (self.repo / "linked_dir").symlink_to(
+            self.root, target_is_directory=True,
+        )
+        os.link(outside, self.repo / "hard.py")
+        os.mkfifo(self.repo / "pipe")
+        for path in ("link.py", "linked_dir/secret.py", "hard.py", "pipe"):
+            with self.subTest(path=path), self.assertRaises(ToolError):
+                self.tools.read_file(path)
+            with self.assertRaises(ToolError):
+                self.tools.edit_file(path, "secret", "public")
+        self.assertNotIn("link.py", self.tools.list_files())
+        self.assertNotIn("hard.py", self.tools.list_files())
+        self.assertEqual(self.tools.search_code("secret"), "No matches.")
+        self.assertEqual(outside.read_text(), "secret = 42\n")
+
+    def test_missing_testbed_has_no_cwd_fallback(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            tools = RepositoryTools(None, SandboxConfig())
+            with self.assertRaisesRegex(ToolError, "TESTBED_PATH"):
+                tools.list_files()
+        with patch.dict(os.environ, {"TESTBED_PATH": str(self.repo)}):
+            self.assertIn("module.py", tools.list_files())
+
+    def test_unicode_output_and_truncation(self) -> None:
+        (self.repo / "unicode.txt").write_text("😀" * 10 + "\n")
+        self.tools.config.max_output_chars = 13
+        self.assertEqual(self.tools.read_file("unicode.txt"), "1: " + "😀" * 10)
+        self.tools.config.max_output_chars = 80
+        (self.repo / "unicode.txt").write_text("😀" * 1000)
+        for output in (self.tools.read_file("unicode.txt"),
+                       self.tools.search_code("😀", "unicode.txt"),
+                       self.tools.list_files()):
+            self.assertLessEqual(len(output), 80)
+            self.assertIn("Output truncated", output)

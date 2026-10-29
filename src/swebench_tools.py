@@ -5,9 +5,11 @@ import os
 from pathlib import Path
 import stat
 from threading import Lock
+import time
 from typing import Iterable, Iterator, TextIO
 from uuid import uuid4
 from fastmcp.exceptions import ToolError
+import regex
 from src.config_model import SandboxConfig
 
 SKIP_DIRECTORIES = {".git", ".venv", "venv", "node_modules", "__pycache__"}
@@ -215,3 +217,59 @@ class RepositoryTools:
              for path in self._files(directory, pattern)),
             "No matching files.",
         )
+
+    def search_code(self, pattern: str, file_pattern: str = "*") -> str:
+        if not pattern:
+            raise self._error("Search pattern must not be empty.")
+        try:
+            expression = regex.compile(pattern)
+        except regex.error as error:
+            raise self._error(f"Invalid regular expression: {error}") from None
+        deadline = time.monotonic() + self.config.max_execution_time_seconds
+
+        def matches() -> Iterator[str]:
+            for path in self._files(".", file_pattern):
+                with self._file(path) as handle:
+                    try:
+                        for number, line in enumerate(handle, 1):
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise TimeoutError
+                            if "\x00" not in line and expression.search(
+                                line, timeout=remaining,
+                            ):
+                                yield (f"{self.root / path}:{number} " +
+                                       line.rstrip("\r\n"))
+                    except UnicodeError:
+                        continue
+        try:
+            return self._render(matches(), "No matches.")
+        except TimeoutError:
+            raise self._error("Search timed out; narrow the query.") from None
+
+    def search_function_or_class_definition_in_code(self, name: str) -> str:
+        if not name.isidentifier():
+            raise self._error("name must be a Python identifier.")
+
+        def definitions() -> Iterator[str]:
+            skipped = 0
+            for path in self._files(".", "*.py"):
+                with self._file(path) as handle:
+                    try:
+                        source = handle.read()
+                        tree = ast.parse(source)
+                    except (UnicodeError, SyntaxError, ValueError):
+                        skipped += 1
+                        continue
+                lines = source.splitlines()
+                for node in sorted(ast.walk(tree), key=lambda n: getattr(
+                    n, "lineno", 0,
+                )):
+                    if isinstance(node, (
+                        ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                    )) and node.name == name:
+                        yield (f"{self.root / path}:{node.lineno} " +
+                               lines[node.lineno - 1])
+            if skipped:
+                yield f"[Skipped {skipped} non-UTF-8 or invalid Python files.]"
+        return self._render(definitions(), "No definitions found.")
