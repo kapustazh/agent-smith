@@ -2,14 +2,15 @@ import asyncio
 from pathlib import Path
 import tempfile
 from uuid import uuid4
+
 from fastmcp.exceptions import ToolError
+
 from src.config_model import SandboxConfig, SWEBenchTaskInput
 from src.docker_process import ProcessResult, capture
 from src.swebench_tools import RepositoryTools
 
 
 class DockerSession:
-
     def __init__(self, task: SWEBenchTaskInput, config: SandboxConfig) -> None:
         self.task = task
         self.config = config
@@ -134,3 +135,68 @@ class DockerSession:
         for name in list(self.containers):
             await self._remove(name)
         self.directory.cleanup()
+
+    async def run_command(
+        self, command: str, workdir: str = "/testbed",
+    ) -> str:
+        if not command.strip() or "\x00" in command:
+            raise self.repository._error(
+                "Supply a non-empty shell command without null bytes.")
+        async with self.lock:
+            relative = self.repository._relative(workdir)
+            with self.repository._directory(relative):
+                directory = str(Path("/testbed") / relative)
+            result = await self._execute(
+                self.container, ["/bin/bash", "-c", command],
+                workdir=directory,
+            )
+            return result.model_dump_json()
+
+    async def run_tests(self) -> str:
+        if not self.task.eval_script.strip():
+            raise self.repository._error("Task eval_script must not be empty.")
+        async with self.lock:
+            temporary = tempfile.TemporaryDirectory(prefix="smith-swe-eval-")
+            with temporary as folder:
+                workspace = Path(folder).resolve()
+                await self._control(
+                    "cp", f"{self.container}:/testbed/.", str(workspace),
+                )
+                name = ""
+                try:
+                    name = await self._create(workspace)
+                    result = await self._execute(
+                        name, ["/bin/bash", "-s"],
+                        self.task.eval_script.encode(),
+                    )
+                    return result.model_dump_json()
+                finally:
+                    if name:
+                        await asyncio.shield(self._remove(name))
+
+    async def get_patch(self) -> str:
+        async with self.lock:
+            script = (
+                "set -e\n"
+                "index=$(mktemp /tmp/smith-index.XXXXXX)\n"
+                "trap 'rm -f \"$index\" \"$index.lock\"' EXIT\n"
+                "export GIT_INDEX_FILE=$index\n"
+                "export GIT_CONFIG_COUNT=2\n"
+                "export GIT_CONFIG_KEY_0=safe.directory\n"
+                "export GIT_CONFIG_VALUE_0=/testbed\n"
+                "export GIT_CONFIG_KEY_1=core.fileMode\n"
+                "export GIT_CONFIG_VALUE_1=false\n"
+                f"git read-tree {self.base}\n"
+                "git add -A -- .\n"
+                f"git diff --cached --binary --no-ext-diff --no-textconv "
+                f"{self.base} --\n"
+            )
+            result = await self._execute(
+                self.container, ["/bin/bash", "-s"], script.encode(),
+            )
+            if result.exit_code != 0 or result.timed_out or result.truncated:
+                raise self.repository._error(
+                    ("Patch unavailable; check Git errors and trusted output "
+                     "limits. " + result.stderr),
+                )
+            return result.stdout
