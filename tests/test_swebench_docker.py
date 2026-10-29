@@ -1,9 +1,13 @@
+import asyncio
 import json
 import os
 import shlex
 import tempfile
 import unittest
+from fastmcp import Client
 from fastmcp.exceptions import ToolError
+from mcp.types import TextContent
+from mcp_tools_swebench import create_server
 from src.config_model import SandboxConfig, SWEBenchTaskInput
 from src.swebench_docker import DockerSession
 
@@ -80,3 +84,81 @@ class DockerTests(unittest.IsolatedAsyncioTestCase):
         )
         applied = json.loads(await self.session.run_command(patch_command))
         self.assertEqual(applied["exit_code"], 0, applied)
+
+    async def test_timeout_stops_children_and_next_call_recovers(self) -> None:
+        result = json.loads(await self.session.run_command(
+            "echo started; sleep 30 & wait",
+        ))
+        self.assertTrue(result["timed_out"])
+        self.assertIn("started", result["stdout"])
+        running = await self.session._control(
+            "inspect", "--format", "{{.State.Running}}",
+            self.session.container,
+        )
+        self.assertEqual(running, "false")
+        recovered = json.loads(await self.session.run_command(
+            "echo recovered",
+        ))
+        self.assertEqual(recovered["stdout"], "recovered\n")
+
+    async def test_cancellation_kills_remote_execution(self) -> None:
+        pending = asyncio.create_task(self.session.run_command(
+            "touch started; sleep 30 & wait",
+        ))
+        try:
+            for _ in range(100):
+                if (self.session.root / "started").exists():
+                    break
+                await asyncio.sleep(.02)
+            self.assertTrue((self.session.root / "started").exists())
+        finally:
+            pending.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await pending
+        self.assertEqual(await self.session._control(
+            "inspect", "--format", "{{.State.Running}}",
+            self.session.container,
+        ), "false")
+
+    async def test_memory_output_limits_and_oversized_patch(self) -> None:
+        killed = json.loads(await self.session.run_command(
+            "python -c 'value = bytearray(256 * 1024 * 1024)'",
+        ))
+        self.assertEqual(killed["exit_code"], 137, killed)
+        self.config.max_output_chars = 100
+        output = json.loads(await self.session.run_command(
+            "python -c \"print('😀' * 10000)\"",
+        ))
+        self.assertTrue(output["truncated"])
+        self.assertLessEqual(len(output["stdout"] + output["stderr"]), 100)
+        self.session.repository.edit_file("calc.py", "a - b", "a + b")
+        with self.assertRaisesRegex(ToolError, "Patch unavailable"):
+            await self.session.get_patch()
+
+
+@unittest.skipUnless(IMAGE, "Run make test-docker for Docker checks.")
+class DockerMCPTests(unittest.IsolatedAsyncioTestCase):
+
+    async def check_client(self, client: Client) -> None:
+        async with client:
+            tools = await client.list_tools()
+            self.assertEqual(len(tools), 9)
+            self.assertTrue(all(tool.description for tool in tools))
+            response = await client.call_tool("read_file", {
+                "filepath": "/testbed/calc.py", "start_line": 1, "end_line": 2,
+            })
+            content = response.content[0]
+            assert isinstance(content, TextContent)
+            self.assertIn("return a - b", content.text)
+            response = await client.call_tool("run_command", {
+                "command": "printf out; printf err >&2; exit 7",
+            })
+            content = response.content[0]
+            assert isinstance(content, TextContent)
+            result = json.loads(content.text)
+            self.assertEqual(result["stdout"], "out")
+            self.assertEqual(result["stderr"], "err")
+            self.assertEqual(result["exit_code"], 7)
+
+    async def test_in_process_lifecycle(self) -> None:
+        await self.check_client(Client(create_server(task=task_input())))
