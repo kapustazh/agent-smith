@@ -113,6 +113,11 @@ subprocesses, host writes and native addons, and revokes bootstrap read/environm
 permissions before running the candidate. Cancellation and timeouts kill and reap
 the runtime process. Failed assertions, exceptions and early exits report failure.
 
+MBPP uses restricted Python: reflection, private attribute access, dynamic
+attribute helpers and Python-to-JavaScript access are blocked. Configuration
+can narrow the supported standard-library exports; it cannot expose arbitrary
+modules. See the sandbox contract for the exact restrictions.
+
 The runtime supports Linux and macOS. Process RSS is sampled every 20 ms, including
 startup, and execution terminates when the memory limit is exceeded. This is a
 watchdog, not a kernel-enforced hard memory ceiling; short allocation spikes may
@@ -133,6 +138,23 @@ make lint
 Tests require Deno and the installed npm assets; missing runtime dependencies fail
 explicitly. CI installs the assets and runs the real executor and MCP transport
 checks without Docker.
+
+### SWE-bench tools
+
+Set `TESTBED_PATH` to the repository to inspect. Start the server:
+
+```bash
+TESTBED_PATH=/absolute/path/to/repo uv run python mcp_tools_swebench.py
+```
+
+All nine tools are published. `TESTBED_PATH` enables repository operations;
+execution tools require a task file. Pull the task's `docker_image`, then use
+`uv run python mcp_tools_swebench.py --task-file cache/swebench_task.json`.
+Docker uses a private `/testbed` copy, shared config limits and no network.
+Test runs preserve installed dependencies in a temporary container image,
+then remove that image and the evaluation workspace.
+`run_tests` returns script logs/exit code, not a benchmark verdict.
+Run `make test-docker` for real container, patch and cleanup checks.
 
 ## Resources
 - MBPP (Mostly Basic Python Problems) benchmark:
