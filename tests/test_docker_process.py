@@ -1,11 +1,41 @@
 import asyncio
 import sys
 import unittest
+from typing import Any
+from unittest.mock import patch
 
-from src.docker_process import capture
+from src.docker_process import capture, start_process
 
 
 class ProcessTests(unittest.IsolatedAsyncioTestCase):
+    async def delayed_spawn(
+        self, *args: Any, **kwargs: Any,
+    ) -> asyncio.subprocess.Process:
+        self.child = await self.original_spawn(*args, **kwargs)
+        self.spawned.set()
+        await asyncio.sleep(0.05)
+        return self.child
+
+    async def test_cancel_during_spawn_reaps_the_unclaimed_process(
+        self,
+    ) -> None:
+        self.original_spawn = asyncio.create_subprocess_exec
+        self.spawned = asyncio.Event()
+        with patch.object(
+            asyncio, "create_subprocess_exec", self.delayed_spawn,
+        ):
+            pending = asyncio.create_task(start_process(
+                sys.executable, "-c", "import time; time.sleep(10)",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            ))
+            try:
+                await asyncio.wait_for(self.spawned.wait(), 2)
+            finally:
+                pending.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await pending
+        self.assertIsNotNone(self.child.returncode)
+
     async def test_exit_code_and_separate_streams(self) -> None:
         result = await capture([
             sys.executable, "-c",

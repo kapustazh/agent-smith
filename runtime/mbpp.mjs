@@ -8,10 +8,12 @@ const driver = readFileSync(
   "utf8",
 );
 const encoder = new TextEncoder();
+const writeOutput = Deno.stdout.writeSync.bind(Deno.stdout);
+const exit = Deno.exit.bind(Deno);
 let remaining = request.config.max_output_bytes;
 let truncated = false;
 function write(bytes) {
-  while (bytes.length) bytes = bytes.subarray(Deno.stdout.writeSync(bytes));
+  while (bytes.length) bytes = bytes.subarray(writeOutput(bytes));
 }
 function emit(text) {
   const bytes = encoder.encode(text);
@@ -34,13 +36,23 @@ try {
   });
   await Deno.permissions.revoke({ name: "read" });
   await Deno.permissions.revoke({ name: "env" });
-  globalThis.__mbpp_emit = emit;
-  python.globals.set("_request_json", JSON.stringify(request));
+  python.globals.set("_config_json", JSON.stringify(request.config));
+  python.globals.set("_emit", emit);
+  const runtime = python.runPython(driver);
+  python.globals.delete("_config_json");
+  python.globals.delete("_emit");
   write(encoder.encode(request.token + "\n"));
-  const passed = python.runPython(driver);
+  // The test list and completion token remain in the JavaScript supervisor.
+  const imports = (request.test_imports ?? []).join("\n");
+  let passed = !imports || runtime.execute(imports, "<test imports>");
+  if (passed) passed = runtime.execute(request.code, "<solution>");
+  for (let index = 0; passed && index < request.test_list.length; index++) {
+    passed = runtime.execute(request.test_list[index], `<test ${index + 1}>`);
+  }
+  runtime.destroy();
   if (passed) write(encoder.encode("\n" + request.token + "\n"));
-  Deno.exit(passed ? 0 : 1);
+  exit(passed ? 0 : 1);
 } catch (error) {
   emit(String(error));
-  Deno.exit(1);
+  exit(1);
 }

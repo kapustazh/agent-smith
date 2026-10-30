@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 
+from anyio import move_on_after
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 from fastmcp.exceptions import ToolError
@@ -21,15 +22,15 @@ from src.docker_process import capture
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = os.environ.get("SWE_DOCKER_TEST_IMAGE", "")
-EVAL = ("cd /testbed\n"
-        "python -c 'from calc import add; assert add(2, 3) == 5'\n"
-        "echo evaluator-only > evaluation-artifact.txt\n")
 
 
 def task_input() -> SWEBenchTaskInput:
     return SWEBenchTaskInput(
         instance_id="fixture-1", problem_statement="Fix add.",
-        docker_image=IMAGE, eval_script=EVAL,
+        docker_image=IMAGE, eval_script=(
+            "cd /testbed\n"
+            "python -c 'from calc import add; assert add(2, 3) == 5'\n"
+            "echo evaluator-only > evaluation-artifact.txt\n"),
     )
 
 
@@ -108,6 +109,21 @@ class DockerTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(recovered["stdout"], "recovered\n")
 
+    async def test_evaluation_preserves_installed_dependencies(self) -> None:
+        await self.session.run_command(
+            "printf 'VALUE = 7\\n' > "
+            "/usr/local/lib/python3.10/site-packages/smith_dependency.py",
+        )
+        self.session.task.eval_script = (
+            "python -c 'import smith_dependency; "
+            "assert smith_dependency.VALUE == 7'\n"
+            "echo evaluation-only > /testbed/evaluation-output\n"
+        )
+        result = json.loads(await self.session.run_tests())
+        self.assertEqual(result["exit_code"], 0, result)
+        self.assertFalse((self.session.root / "evaluation-output").exists())
+        self.assertEqual(self.session.images, set())
+
     async def test_cancellation_kills_remote_execution(self) -> None:
         pending = asyncio.create_task(self.session.run_command(
             "touch started; sleep 30 & wait",
@@ -126,6 +142,24 @@ class DockerTests(unittest.IsolatedAsyncioTestCase):
             "inspect", "--format", "{{.State.Running}}",
             self.session.container,
         ), "false")
+
+    async def test_mcp_cancel_scope_cleans_commands_and_evaluation(
+        self,
+    ) -> None:
+        with move_on_after(0.3) as command_scope:
+            await self.session.run_command("sleep 30 & wait")
+        self.assertTrue(command_scope.cancel_called)
+        self.assertEqual(await self.session._control(
+            "inspect", "--format", "{{.State.Running}}",
+            self.session.container,
+        ), "false")
+        self.session.task.eval_script = "sleep 30 & wait"
+        with move_on_after(0.3) as test_scope:
+            await self.session.run_tests()
+        self.assertTrue(test_scope.cancel_called)
+        self.assertEqual(self.session.images, set())
+        self.assertEqual(set(self.session.containers),
+                         {self.session.container})
 
     async def test_memory_output_limits_and_oversized_patch(self) -> None:
         killed = json.loads(await self.session.run_command(

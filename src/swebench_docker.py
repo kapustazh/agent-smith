@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 from uuid import uuid4
 
+from anyio import CancelScope
 from fastmcp.exceptions import ToolError
 
 from src.config_model import SandboxConfig, SWEBenchTaskInput
@@ -18,6 +19,7 @@ class DockerSession:
         self.root = Path(self.directory.name).resolve() / "repo"
         self.root.mkdir()
         self.containers: dict[str, Path | None] = {}
+        self.images: set[str] = set()
         self.container = ""
         self.base = ""
         self.lock = asyncio.Lock()
@@ -25,9 +27,10 @@ class DockerSession:
 
     async def _control(self, *arguments: str, check: bool = True) -> str:
         try:
-            result = await capture(
-                ["docker", *arguments], 30, 4096,
-            )
+            with CancelScope(shield=True):
+                result = await capture(
+                    ["docker", *arguments], 30, 4096,
+                )
         except FileNotFoundError:
             raise self.repository._error(
                 "Docker is missing. Install and start Docker.")
@@ -38,7 +41,9 @@ class DockerSession:
             )
         return result.stdout.strip()
 
-    async def _create(self, workspace: Path | None) -> str:
+    async def _create(
+        self, workspace: Path | None, image: str | None = None,
+    ) -> str:
         name = "smith-swe-" + uuid4().hex
         self.containers[name] = workspace
         arguments = [
@@ -55,13 +60,14 @@ class DockerSession:
                 "--mount", f"type=bind,src={workspace},dst=/testbed",
             ])
         arguments.extend([
-            "--", self.task.docker_image, "-c",
+            "--", image or self.task.docker_image, "-c",
             "while :; do sleep 3600; done",
         ])
         try:
             await self._control(*arguments)
         except BaseException:
-            await asyncio.shield(self._remove(name))
+            with CancelScope(shield=True):
+                await asyncio.shield(self._remove(name))
             raise
         return name
 
@@ -109,7 +115,9 @@ class DockerSession:
                 self.config.max_output_chars, data,
             )
         except asyncio.CancelledError:
-            await asyncio.shield(self._control("kill", container, check=False))
+            with CancelScope(shield=True):
+                await asyncio.shield(self._control(
+                    "kill", container, check=False))
             raise
         if result.timed_out:
             await self._control("kill", container, check=False)
@@ -132,9 +140,21 @@ class DockerSession:
         self.containers.pop(name, None)
 
     async def close(self) -> None:
-        for name in list(self.containers):
-            await self._remove(name)
-        self.directory.cleanup()
+        try:
+            for name in list(self.containers):
+                await self._remove(name)
+        finally:
+            for image in tuple(self.images):
+                await self._remove_image(image)
+            self.directory.cleanup()
+
+    async def _remove_image(self, image: str) -> None:
+        try:
+            await self._control("image", "rm", "--force", image)
+        except ToolError as error:
+            if "no such image" not in str(error).lower():
+                raise
+        self.images.discard(image)
 
     async def run_command(
         self, command: str, workdir: str = "/testbed",
@@ -156,22 +176,33 @@ class DockerSession:
         if not self.task.eval_script.strip():
             raise self.repository._error("Task eval_script must not be empty.")
         async with self.lock:
-            temporary = tempfile.TemporaryDirectory(prefix="smith-swe-eval-")
-            with temporary as folder:
-                workspace = Path(folder).resolve()
-                await self._control(
-                    "cp", f"{self.container}:/testbed/.", str(workspace),
+            image = "smith-swe-eval-" + uuid4().hex
+            self.images.add(image)
+            try:
+                # Commits preserve dependencies but exclude the /testbed mount.
+                await self._control("commit", self.container, image)
+                return await self._run_evaluation(image)
+            finally:
+                with CancelScope(shield=True):
+                    await asyncio.shield(self._remove_image(image))
+
+    async def _run_evaluation(self, image: str) -> str:
+        with tempfile.TemporaryDirectory(prefix="smith-swe-eval-") as folder:
+            workspace = Path(folder).resolve()
+            await self._control(
+                "cp", f"{self.container}:/testbed/.", str(workspace),
+            )
+            name = ""
+            try:
+                name = await self._create(workspace, image)
+                result = await self._execute(
+                    name, ["/bin/bash", "-s"],
+                    self.task.eval_script.encode(),
                 )
-                name = ""
-                try:
-                    name = await self._create(workspace)
-                    result = await self._execute(
-                        name, ["/bin/bash", "-s"],
-                        self.task.eval_script.encode(),
-                    )
-                    return result.model_dump_json()
-                finally:
-                    if name:
+                return result.model_dump_json()
+            finally:
+                if name:
+                    with CancelScope(shield=True):
                         await asyncio.shield(self._remove(name))
 
     async def get_patch(self) -> str:

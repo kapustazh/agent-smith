@@ -6,13 +6,15 @@ import socket
 import subprocess
 import sys
 import tempfile
+from threading import Event, Timer
 import unittest
 from unittest.mock import patch
+from anyio import move_on_after
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
-from mcp_tools_swebench import create_server
+from mcp_tools_swebench import SWEBenchMCP, create_server
 from src.config_model import SandboxConfig
 from src.swebench_tools import RepositoryTools
 
@@ -141,6 +143,15 @@ class RepositoryCase(unittest.TestCase):
         with self.assertRaisesRegex(ToolError, "timed out"):
             self.tools.search_code("(a+)+$", "long.txt")
 
+    def test_recursive_glob_includes_root_files(self) -> None:
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg/nested.py").write_text("value = 1\n")
+        output = self.tools.list_files(pattern="**/*.py")
+        self.assertIn(str(self.repo / "module.py"), output)
+        self.assertIn(str(self.repo / "pkg/nested.py"), output)
+        self.assertIn("module.py", self.tools.search_code(
+            "def solve", "**/*.py"))
+
     def test_definitions_include_async(self) -> None:
         (self.repo / "broken.py").write_text("def broken(:")
         (self.repo / "comment.txt").write_text("def solve(): pass")
@@ -245,6 +256,28 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.directory.name).resolve()
         (self.root / "module.py").write_text(SOURCE)
 
+    def delayed_write(self, release: Event) -> str:
+        release.wait(2)
+        (self.root / "module.py").write_text("complete\n")
+        return "complete"
+
+    async def test_cancelled_repository_work_finishes_before_unlock(
+        self,
+    ) -> None:
+        owner = SWEBenchMCP(self.root, SandboxConfig(), None)
+        release = Event()
+        timer = Timer(0.3, release.set)
+        timer.start()
+        try:
+            with move_on_after(0.02):
+                await owner.call_repository(self.delayed_write, release)
+            self.assertEqual((self.root / "module.py").read_text(),
+                             "complete\n")
+            self.assertFalse(owner.lock.locked())
+        finally:
+            release.set()
+            timer.join()
+
     async def check_client(self, client: Client) -> None:
         async with client:
             tools = {tool.name: tool for tool in await client.list_tools()}
@@ -252,7 +285,16 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 "read_file", "edit_file", "list_files", "search_code",
                 "search_function_or_class_definition_in_code",
                 "find_references",
+                "run_command", "run_tests", "get_patch",
             })
+            self.assertEqual(len(await client.list_resources()), 1)
+            self.assertEqual(len(await client.list_prompts()), 1)
+            for operation, execution_args in (
+                ("run_command", {"command": "true"}),
+                ("run_tests", {}), ("get_patch", {}),
+            ):
+                with self.assertRaisesRegex(ToolError, "--task-file"):
+                    await client.call_tool(operation, execution_args)
             schema = tools["find_references"].input_schema
             self.assertEqual(set(schema["required"]),
                              {"name", "filepath", "line"})

@@ -115,8 +115,25 @@ The runtime loads only local assets. Read permission is scoped to those assets
 during bootstrap and revoked before the candidate runs. Network/module downloads,
 host writes, subprocesses, FFI and system queries are denied. Python filesystem
 operations use an in-memory filesystem; no host directories are mounted. Python
-import guards, restricted builtins and an audit hook enforce the configured
-allowlists. No benchmark solution data is loaded.
+syntax/attribute guards, selected builtins and filesystem audit checks enforce
+the configured policy. No benchmark solution data is loaded.
+
+The runtime supports a restricted Python execution model, not arbitrary Python
+metaprogramming. The configured imports can only narrow the curated exports in
+`runtime/mbpp_driver.py`. Private imports/attributes, globals/locals inspection,
+stack/generator frames, dynamic attribute helpers, custom metaclasses and
+Python-to-JavaScript imports are denied. `type` supports inspection, not dynamic
+class construction. Standard classes, functions, recursion, comprehensions,
+annotations, public string formatting and `datetime.strptime` remain supported.
+Helpers that implicitly evaluate annotations or traverse arbitrary attributes
+(`typing.get_type_hints`, `operator.attrgetter`/`methodcaller`, raw
+`string.Formatter`, and `functools.update_wrapper`/`wraps`/`singledispatch`) are
+not exported. These restrictions also apply to task imports and assertions.
+
+The complete test list and completion token remain in JavaScript. Python receives
+only the current execution stage; a solution cannot replace later assertions by
+changing a request dictionary in its interpreter. The supervisor binds its output
+and exit functions before candidate execution.
 
 The Python supervisor kills the process group on timeout, memory termination or
 cancellation. Linux/macOS RSS monitoring includes startup and samples every 20 ms;

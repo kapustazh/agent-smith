@@ -11,6 +11,7 @@ from typing import Any
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from anyio import move_on_after
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 from mcp.types import TextContent
@@ -30,11 +31,25 @@ def decode_result(text: str) -> dict[str, Any]:
 
 
 class ContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_server_instances_keep_separate_limits(self) -> None:
+        small = mbpp.MBPPTools(SandboxConfig(max_output_bytes=32))
+        large = mbpp.MBPPTools(SandboxConfig(max_output_bytes=128))
+        outputs = []
+        for tools in (small, large, small):
+            result = decode_result(await tools.run_tests("", ["pass"]))
+            self.assertFalse(result["success"])
+            self.assertLessEqual(len(result["output"].encode()),
+                                 tools.config.max_output_bytes)
+            outputs.append(result["output"])
+        self.assertEqual(outputs[0], outputs[2])
+        self.assertNotEqual(outputs[0], outputs[1])
+
     async def test_empty_inputs_do_not_launch_runtime(self) -> None:
         with patch.object(mbpp, "execute_mbpp", new_callable=AsyncMock) as run:
             for code, tests in [("", ["pass"]), ("pass", []),
                                 ("pass", [" "])]:
-                result = decode_result(await mbpp.run_tests(code, tests))
+                result = decode_result(await mbpp.MBPPTools().run_tests(
+                    code, tests))
                 self.assertFalse(result["success"])
             run.assert_not_called()
 
@@ -42,11 +57,10 @@ class ContractTests(unittest.IsolatedAsyncioTestCase):
         config = SandboxConfig(max_execution_time_seconds=2,
                                max_memory_mb=256, max_output_bytes=73)
         with (
-            patch.object(mbpp, "sandbox_config", config),
             patch.object(mbpp, "execute_mbpp", new_callable=AsyncMock) as run,
         ):
             run.return_value = MBPPExecutionResult(success=True, output="OK")
-            await mbpp.run_tests("pass", ["pass"])
+            await mbpp.MBPPTools(config).run_tests("pass", ["pass"])
         request = run.call_args.args[0]
         self.assertEqual(request.config.model_dump(), config.model_dump())
         self.assertEqual(request.code, "pass")
@@ -87,14 +101,11 @@ class RuntimeCase(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.config = SandboxConfig(max_execution_time_seconds=2)
-        config = patch.object(mbpp, "sandbox_config", self.config)
-        config.start()
-        self.addCleanup(config.stop)
 
     async def run_code(
         self, code: str, tests: list[str] | None = None,
     ) -> dict[str, Any]:
-        return decode_result(await mbpp.run_tests(
+        return decode_result(await mbpp.MBPPTools(self.config).run_tests(
             code, tests if tests is not None else ["assert True"],
         ))
 
@@ -190,20 +201,12 @@ class RuntimeTests(RuntimeCase):
         self.assertFalse(result["success"], result)
         self.assertIn("FileNotFoundError", result["output"])
 
-    async def test_deno_blocks_host_access_even_with_js_import_allowed(
-        self,
-    ) -> None:
-        # Exercise the outer permission boundary, independent of import guards.
-        self.config.authorized_imports.append("js")
-        for operation in [
-            "js.Deno.readTextFileSync('/etc/passwd')",
-            "js.Deno.env.get('HOME')",
-            "js.Deno.Command.new('/bin/sh').spawn()",
-            "js.WebSocket.new('ws://1.1.1.1:80')",
-        ]:
-            result = await self.run_code("import js\n" + operation)
+    async def test_bridge_and_unknown_modules_cannot_be_enabled(self) -> None:
+        for module in ("js", "pyodide", "sys", "os", "inspect", "types"):
+            self.config.authorized_imports.append(module)
+            result = await self.run_code("import " + module)
             self.assertFalse(result["success"], result)
-            self.assertIn("NotCapable", result["output"])
+            self.assertIn("Import denied", result["output"])
 
     async def test_concurrent_calls_are_independent(self) -> None:
         results = await asyncio.gather(*[
@@ -235,6 +238,95 @@ class RuntimeTests(RuntimeCase):
                 with self.assertRaises(asyncio.CancelledError):
                     await task
         self.assertIsNotNone(children[0].returncode)
+
+    async def test_mcp_cancel_scope_reaps_runtime_and_readers(self) -> None:
+        deno = shutil.which("deno")
+        assert deno is not None
+        runner = executor.MBPPExecutor(MBPPExecutionRequest(
+            code="while True: pass", test_list=["pass"], config=self.config,
+        ), ROOT, deno)
+        with move_on_after(0.3) as scope:
+            await runner.run()
+        self.assertTrue(scope.cancel_called)
+        self.assertIsNotNone(runner.process)
+        assert runner.process is not None
+        self.assertIsNotNone(runner.process.returncode)
+        self.assertTrue(all(reader.done() for reader in runner.readers))
+        self.assertTrue(runner.monitor is not None and runner.monitor.done())
+
+    async def test_datetime_and_ordinary_python_remain_usable(self) -> None:
+        result = await self.run_code('''
+from __future__ import annotations
+import datetime
+from collections import Counter, defaultdict
+from functools import lru_cache
+from typing import List
+
+@lru_cache(None)
+def fib(n: int) -> int:
+    return n if n < 2 else fib(n - 1) + fib(n - 2)
+
+class Point:
+    def __init__(self, x):
+        self.x = x
+
+def solve(xs: List[int]):
+    counts = defaultdict(int)
+    for x in xs:
+        counts[x] += 1
+    return Counter(counts)
+
+assert datetime.datetime.strptime("2026-10-23", "%Y-%m-%d").year == 2026
+assert fib(10) == 55
+assert solve([1, 1, 2])[1] == 2
+assert "{0.x:02d}".format(Point(3)) == "03"
+assert "{value}".format_map({"value": "ok"}) == "ok"
+''')
+        self.assertTrue(result["success"], result)
+
+    async def test_reflection_and_transitive_capabilities_are_denied(
+        self,
+    ) -> None:
+        attempts = [
+            'open.__globals__["builtins"].eval("6 * 7")',
+            '''for cell in open.__closure__:
+    if isinstance(cell.cell_contents, list): cell.cell_contents.append("/")
+print(open("/lib/python3.10/os.py").read())''',
+            '''def solve(): return 0
+frame = open.__globals__["sys"]._getframe()
+while frame:
+    request = frame.f_locals.get("request")
+    if isinstance(request, dict) and "test_list" in request:
+        request["test_list"][:] = ["assert True"]
+        break
+    frame = frame.f_back''',
+            'from collections import _sys as system',
+            'from random import _os as operating_system',
+            'from typing import sys as system',
+            'import typing\ntyping.sys.modules',
+            'import operator\noperator.attrgetter("__globals__")(open)',
+            'import operator\noperator.methodcaller("__getattribute__", '
+            '"__globals__")(open)',
+            'import string\nstring.Formatter().get_field('
+            '"0.__globals__", (open,), {})',
+            '"{0.__globals__}".format(open)',
+            'str.format("{0.__globals__}", type)',
+            '''match type:
+    case object(__globals__=leaked):
+        print(leaked)''',
+            'getattr(open, "_" + "_globals__")',
+            'globals()',
+            'g = (x for x in [1])\ng.gi_frame',
+            'import typing\ntyping.get_type_hints(type)',
+            'import functools\nfunctools.update_wrapper(open, print)',
+            'import functools\nfunctools.singledispatch(print)',
+            'import _strptime\n_strptime.sys.modules',
+        ]
+        for code in attempts:
+            with self.subTest(code=code):
+                result = await self.run_code(code)
+                self.assertFalse(result["success"], result)
+                self.assertTrue(result["output"], result)
 
 
 class TransportTests(RuntimeCase):

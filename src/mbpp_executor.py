@@ -11,12 +11,11 @@ import tempfile
 from typing import Literal
 from uuid import uuid4
 
+from anyio import CancelScope
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.config_model import SandboxConfig
-
-
-ROOT = Path(__file__).resolve().parents[1]
+from src.docker_process import capture, start_process
 
 
 class MBPPExecutionRequest(BaseModel):
@@ -72,7 +71,8 @@ async def execute_mbpp(request: MBPPExecutionRequest) -> MBPPExecutionResult:
             "`uv run python mcp_tools_mbpp.py`, or install Deno on PATH.",
             request.config,
         )
-    assets = ROOT / "node_modules/pyodide"
+    root = Path(__file__).resolve().parents[1]
+    assets = root / "node_modules/pyodide"
     missing = [name for name in (
         "pyodide.mjs", "pyodide.asm.js", "pyodide.asm.wasm",
         "pyodide.asm.data", "pyodide_py.tar", "repodata.json",
@@ -82,7 +82,7 @@ async def execute_mbpp(request: MBPPExecutionRequest) -> MBPPExecutionResult:
             False, "MBPP setup error: the local Pyodide installation is "
             "missing or incomplete. Missing files: " + ", ".join(missing) +
             ". No code or tests were executed. From the project directory "
-            f"({ROOT}), run `make install` (installs Pyodide using "
+            f"({root}), run `make install` (installs Pyodide using "
             "`npm ci --ignore-scripts`), then retry the call.",
             request.config,
         )
@@ -94,165 +94,169 @@ async def execute_mbpp(request: MBPPExecutionRequest) -> MBPPExecutionResult:
             request.config,
         )
 
-    config = request.config
-    token = "__MBPP_" + uuid4().hex + "__"
-    payload = request.model_dump()
-    payload["token"] = token
-    prefix = bytearray()
-    completed = False
-    truncated = False
-    failure = ""
-    process: asyncio.subprocess.Process | None = None
-    readers: list[asyncio.Task[None]] = []
-    monitor: asyncio.Task[None] | None = None
+    return await MBPPExecutor(request, root, deno).run()
 
-    def retain(data: bytes) -> None:
-        nonlocal truncated
-        room = config.max_output_bytes - len(prefix)
-        prefix.extend(data[:max(0, room)])
-        truncated = truncated or len(data) > room
+
+class MBPPExecutor:
+    def __init__(
+        self, request: MBPPExecutionRequest, root: Path, deno: str,
+    ) -> None:
+        self.request = request
+        self.config = request.config
+        self.root = root
+        self.deno = deno
+        self.token = "__MBPP_" + uuid4().hex + "__"
+        self.marker = ("\n" + self.token + "\n").encode()
+        self.prefix = bytearray()
+        self.completed = False
+        self.truncated = False
+        self.failure = ""
+        self.process: asyncio.subprocess.Process | None = None
+        self.readers: list[asyncio.Task[None]] = []
+        self.monitor: asyncio.Task[None] | None = None
+
+    def retain(self, data: bytes) -> None:
+        room = self.config.max_output_bytes - len(self.prefix)
+        self.prefix.extend(data[:max(0, room)])
+        self.truncated |= len(data) > room
 
     async def read_output(
-        stream: asyncio.StreamReader, framed: bool = False,
+        self, stream: asyncio.StreamReader, framed: bool = False,
     ) -> None:
-        nonlocal completed
-        marker = ("\n" + token + "\n").encode()
         pending = b""
         while chunk := await stream.read(4096):
             if not framed:
-                retain(chunk)
+                self.retain(chunk)
                 continue
             pending += chunk
-            if marker in pending:
-                completed = True
-                pending = pending.replace(marker, b"")
-            room = max(0, len(pending) - len(marker) + 1)
-            retain(pending[:room])
+            if self.marker in pending:
+                self.completed = True
+                pending = pending.replace(self.marker, b"")
+            room = max(0, len(pending) - len(self.marker) + 1)
+            self.retain(pending[:room])
             pending = pending[room:]
-        retain(pending)
+        self.retain(pending)
 
-    async def monitor_memory(pid: int) -> None:
-        nonlocal failure
-        # shortcut: RSS sampling can miss spikes; use OS limits for a hard cap.
-        while True:
-            check = await asyncio.create_subprocess_exec(
-                "ps", "-o", "rss=", "-p", str(pid),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
+    def kill(self) -> None:
+        if self.process is not None and self.process.returncode is None:
             try:
-                rss, _ = await check.communicate()
-            finally:
-                if check.returncode is None:
-                    check.kill()
-                    await check.wait()
-            if check.returncode or not rss.strip():
-                assert process is not None
-                if process.returncode is not None:
-                    return
-                raise OSError("ps failed or returned no memory measurement")
-            if int(rss) > config.max_memory_mb * 1024:
-                failure = "Memory limit exceeded (%s MiB)." % (
-                    config.max_memory_mb)
-                try:
-                    os.killpg(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                return
-            await asyncio.sleep(0.02)
-
-    try:
-        with tempfile.TemporaryDirectory(prefix="mbpp-") as directory:
-            process = await asyncio.create_subprocess_exec(
-                deno, "run", "--no-prompt", "--no-config", "--no-lock",
-                "--cached-only", "--no-remote", "--node-modules-dir=manual",
-                "--allow-read=" + str(ROOT / "node_modules") + "," +
-                str(ROOT / "runtime"),
-                "--allow-env=WS_NO_BUFFER_UTIL,WS_NO_UTF_8_VALIDATE",
-                "--deny-net", "--deny-run", "--deny-write", "--deny-ffi",
-                "--deny-sys", "--deny-import",
-                f"--v8-flags=--wasm-max-mem-pages={config.max_memory_mb * 16},"
-                f"--max-old-space-size={config.max_memory_mb}",
-                str(ROOT / "runtime/mbpp.mjs"),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=directory, start_new_session=True,
-                env={"HOME": directory, "PATH": os.defpath,
-                     "DENO_NO_UPDATE_CHECK": "1", "NO_COLOR": "1"},
-            )
-            assert process.stdin is not None
-            assert process.stdout is not None
-            assert process.stderr is not None
-            readers.append(asyncio.create_task(read_output(process.stderr)))
-
-            async def supervise_memory() -> None:
-                nonlocal failure
-                assert process is not None
-                try:
-                    await monitor_memory(process.pid)
-                except (OSError, ValueError) as error:
-                    failure = f"Memory monitoring failed: {error}"
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-
-            monitor = asyncio.create_task(supervise_memory())
-
-            async def initialize() -> bytes:
-                assert process is not None and process.stdin is not None
-                assert process.stdout is not None
-                process.stdin.write(json.dumps(payload).encode())
-                await process.stdin.drain()
-                process.stdin.close()
-                return await process.stdout.readline()
-
-            # Startup has its own watchdog; candidate time starts at ready.
-            ready = await asyncio.wait_for(initialize(), 30)
-            if ready != (token + "\n").encode():
-                retain(ready)
-                failure = failure or "Runtime failed before execution."
-            readers.append(asyncio.create_task(read_output(
-                process.stdout, framed=True,
-            )))
-            try:
-                await asyncio.wait_for(
-                    process.wait(), config.max_execution_time_seconds,
-                )
-            except asyncio.TimeoutError:
-                failure = ("Execution timed out after %ss; "
-                           "output is partial." %
-                           config.max_execution_time_seconds)
-    except asyncio.TimeoutError:
-        failure = ("MBPP runtime initialization timed out after 30s. "
-                   "No code or tests were executed.")
-    except (OSError, ValueError) as error:
-        failure = failure or f"Runtime execution failed: {error}"
-    finally:
-        if process is not None and process.returncode is None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
+                os.killpg(self.process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            await process.wait()
-        if monitor is not None:
-            monitor.cancel()
-            await asyncio.gather(monitor, return_exceptions=True)
-        await asyncio.gather(*readers, return_exceptions=True)
 
-    output = bytes(prefix).decode("utf-8", "replace")
-    success = (not failure and completed and process is not None and
-               process.returncode == 0)
-    diagnostic = " ".join(text for text in (
-        failure, "Output truncated." if truncated else "",
-    ) if text)
-    if (not success and not diagnostic and process is not None and
-            not output.strip()):
-        diagnostic = (f"MBPP runtime exited with status {process.returncode} "
-                      "before confirming that all tests completed. "
-                      "The result is a failure, not a passing test run.")
-    if not output.strip() and not diagnostic:
-        output = (f"All {len(request.test_list)} tests passed." if success else
-                  "Execution ended before all tests passed.")
-    return execution_result(success, output, config, diagnostic)
+    async def monitor_memory(self) -> None:
+        assert self.process is not None
+        try:
+            # shortcut: RSS sampling can miss spikes; use OS limits for a hard
+            # cap.
+            while self.process.returncode is None:
+                result = await capture([
+                    "ps", "-o", "rss=", "-p", str(self.process.pid),
+                ], 2, 64)
+                if result.exit_code or not result.stdout.strip():
+                    if self.process.returncode is not None:
+                        return
+                    raise OSError(
+                        "ps failed or returned no memory measurement")
+                if int(result.stdout) > self.config.max_memory_mb * 1024:
+                    self.failure = ("Memory limit exceeded "
+                                    f"({self.config.max_memory_mb} MiB).")
+                    self.kill()
+                    return
+                await asyncio.sleep(0.02)
+        except Exception as error:
+            self.failure = f"Memory monitoring failed: {error}"
+            self.kill()
+
+    async def start(self, directory: str) -> None:
+        memory = self.config.max_memory_mb
+        self.process = await start_process(
+            self.deno, "run", "--no-prompt", "--no-config", "--no-lock",
+            "--cached-only", "--no-remote", "--node-modules-dir=manual",
+            "--allow-read=" + str(self.root / "node_modules") + "," +
+            str(self.root / "runtime"),
+            "--allow-env=WS_NO_BUFFER_UTIL,WS_NO_UTF_8_VALIDATE",
+            "--deny-net", "--deny-run", "--deny-write", "--deny-ffi",
+            "--deny-sys", "--deny-import",
+            f"--v8-flags=--wasm-max-mem-pages={memory * 16},"
+            f"--max-old-space-size={memory}",
+            str(self.root / "runtime/mbpp.mjs"),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, cwd=directory,
+            start_new_session=True,
+            env={"HOME": directory, "PATH": os.defpath,
+                 "DENO_NO_UPDATE_CHECK": "1", "NO_COLOR": "1"},
+        )
+        assert self.process.stderr is not None
+        self.readers.append(asyncio.create_task(
+            self.read_output(self.process.stderr)))
+        self.monitor = asyncio.create_task(self.monitor_memory())
+
+    async def initialize(self) -> None:
+        process = self.process
+        assert process is not None
+        assert process.stdin is not None and process.stdout is not None
+        payload = self.request.model_dump()
+        payload["token"] = self.token
+        process.stdin.write(json.dumps(payload).encode())
+        await process.stdin.drain()
+        process.stdin.close()
+        ready = await process.stdout.readline()
+        if ready != (self.token + "\n").encode():
+            self.retain(ready)
+            self.failure = self.failure or "Runtime failed before execution."
+        self.readers.append(asyncio.create_task(
+            self.read_output(process.stdout, framed=True)))
+
+    async def close(self) -> None:
+        with CancelScope(shield=True):
+            self.kill()
+            if self.process is not None:
+                await self.process.wait()
+            if self.monitor is not None:
+                self.monitor.cancel()
+                await asyncio.gather(self.monitor, return_exceptions=True)
+            await asyncio.gather(*self.readers, return_exceptions=True)
+
+    async def run(self) -> MBPPExecutionResult:
+        try:
+            with tempfile.TemporaryDirectory(prefix="mbpp-") as directory:
+                try:
+                    await self.start(directory)
+                    # Startup and candidate execution have separate watchdogs.
+                    await asyncio.wait_for(self.initialize(), 30)
+                    assert self.process is not None
+                    try:
+                        await asyncio.wait_for(
+                            self.process.wait(),
+                            self.config.max_execution_time_seconds,
+                        )
+                    except asyncio.TimeoutError:
+                        seconds = self.config.max_execution_time_seconds
+                        self.failure = ("Execution timed out after "
+                                        f"{seconds}s; "
+                                        "output is partial.")
+                finally:
+                    await self.close()
+        except asyncio.TimeoutError:
+            self.failure = ("MBPP runtime initialization timed out after 30s. "
+                            "No code or tests were executed.")
+        except (OSError, ValueError) as error:
+            self.failure = self.failure or f"Runtime execution failed: {error}"
+        return self.finish()
+
+    def finish(self) -> MBPPExecutionResult:
+        output = bytes(self.prefix).decode("utf-8", "replace")
+        success = (not self.failure and self.completed and
+                   self.process is not None and self.process.returncode == 0)
+        diagnostic = " ".join(text for text in (
+            self.failure, "Output truncated." if self.truncated else "",
+        ) if text)
+        if not success and not diagnostic and not output.strip():
+            status = self.process.returncode if self.process else None
+            diagnostic = (f"MBPP runtime exited with status {status} before "
+                          "confirming that all tests completed. "
+                          "The result is a failure, not a passing test run.")
+        if not output.strip() and not diagnostic:
+            output = f"All {len(self.request.test_list)} tests passed."
+        return execution_result(success, output, self.config, diagnostic)

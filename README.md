@@ -113,6 +113,11 @@ subprocesses, host writes and native addons, and revokes bootstrap read/environm
 permissions before running the candidate. Cancellation and timeouts kill and reap
 the runtime process. Failed assertions, exceptions and early exits report failure.
 
+MBPP uses restricted Python: reflection, private attribute access, dynamic
+attribute helpers and Python-to-JavaScript access are blocked. Configuration
+can narrow the supported standard-library exports; it cannot expose arbitrary
+modules. See the sandbox contract for the exact restrictions.
+
 The runtime supports Linux and macOS. Process RSS is sampled every 20 ms, including
 startup, and execution terminates when the memory limit is exceeded. This is a
 watchdog, not a kernel-enforced hard memory ceiling; short allocation spikes may
@@ -142,10 +147,12 @@ Set `TESTBED_PATH` to the repository to inspect. Start the server:
 TESTBED_PATH=/absolute/path/to/repo uv run python mcp_tools_swebench.py
 ```
 
-Six tools provide file reads/edits, listing, search, definitions and references.
-For all nine tools, pull the task's `docker_image`, then start with
+All nine tools are published. `TESTBED_PATH` enables repository operations;
+execution tools require a task file. Pull the task's `docker_image`, then use
 `uv run python mcp_tools_swebench.py --task-file cache/swebench_task.json`.
 Docker uses a private `/testbed` copy, shared config limits and no network.
+Test runs preserve installed dependencies in a temporary container image,
+then remove that image and the evaluation workspace.
 `run_tests` returns script logs/exit code, not a benchmark verdict.
 Run `make test-docker` for real container, patch and cleanup checks.
 

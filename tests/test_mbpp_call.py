@@ -84,16 +84,15 @@ class ErrorTests(unittest.IsolatedAsyncioTestCase):
             run.return_value = executor.MBPPExecutionResult(
                 success=True, output="OK",
             )
-            await mbpp.run_tests("def solve(): return math.pi",
-                                 ["assert solve() > 3"], ["import math"])
+            await mbpp.MBPPTools().run_tests(
+                "def solve(): return math.pi", ["assert solve() > 3"],
+                ["import math"])
         self.assertEqual(run.call_args.args[0].test_imports, ["import math"])
 
     async def test_invalid_request_feedback_and_tiny_budgets(self) -> None:
         for limit in (8192, 1, 17):
-            with patch.object(mbpp, "sandbox_config", SandboxConfig(
-                max_output_bytes=limit,
-            )):
-                result = json.loads(await mbpp.run_tests(SOLUTION, [], [""]))
+            tools = mbpp.MBPPTools(SandboxConfig(max_output_bytes=limit))
+            result = json.loads(await tools.run_tests(SOLUTION, [], [""]))
             self.assertFalse(result["success"])
             self.assertLessEqual(len(result["output"].encode()), limit)
             if limit == 8192:
@@ -111,11 +110,14 @@ class ErrorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CallTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.tools = mbpp.MBPPTools()
+
     async def call(
         self, code: str, tests: list[str], imports: list[str] | None = None,
     ) -> dict[str, Any]:
         result: dict[str, Any] = json.loads(
-            await mbpp.run_tests(code, tests, imports),
+            await self.tools.run_tests(code, tests, imports),
         )
         self.assertEqual(set(result), {"success", "output"})
         return result
@@ -189,7 +191,7 @@ class CallTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<exec>", result["output"])
 
     async def test_timeout_and_truncation_are_both_reported(self) -> None:
-        with patch.object(mbpp, "sandbox_config", SandboxConfig(
+        with patch.object(self.tools, "config", SandboxConfig(
             max_execution_time_seconds=1, max_output_bytes=256,
         )):
             result = await self.call(
@@ -206,10 +208,7 @@ class CallTests(unittest.IsolatedAsyncioTestCase):
         for command in ("/usr/bin/false", "/usr/bin/true"):
             async def failed_ps(*args: Any, **kwargs: Any) -> Any:
                 if args[0] == "ps":
-                    return await create(
-                        command, stdout=subprocess.PIPE,
-                        stderr=subprocess.DEVNULL,
-                    )
+                    return await create(command, **kwargs)
                 return await create(*args, **kwargs)
 
             with patch.object(executor.asyncio,
@@ -217,6 +216,7 @@ class CallTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.call("while True: pass", ["assert True"])
             self.assertFalse(result["success"], result)
             self.assertIn("Memory monitoring failed", result["output"])
+            self.assertIn("ps failed", result["output"])
 
     async def test_real_mcp_optional_import_argument(self) -> None:
         async with Client(mbpp.mcp) as client:

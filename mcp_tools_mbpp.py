@@ -13,51 +13,51 @@ from src.mbpp_executor import (
 )
 
 
-mcp = FastMCP("Agent Smith - MBPP")
 app = typer.Typer(add_completion=False)
-sandbox_config = SandboxConfig()
 
 
-@mcp.tool()
-async def run_tests(
-    code: str, test_list: list[str], test_imports: list[str] | None = None,
-) -> str:
-    """Test a candidate against supplied assertions in the Deno sandbox.
+class MBPPTools:
+    def __init__(self, config: SandboxConfig | None = None) -> None:
+        self.config = config or SandboxConfig()
 
-    Optional test_imports are executed before code and test_list in the same
-    isolated namespace. Returns a JSON string containing success and output.
-    Setup errors explain why tests did not run and how to repair the server.
-    The server uses the sandbox's trusted configuration;
-    the caller cannot override execution limits. No hidden tests are accessed.
-    """
-    try:
-        request = MBPPExecutionRequest(
-            code=code, test_list=test_list, config=sandbox_config,
-            test_imports=test_imports if test_imports is not None else [],
-        )
-    except ValidationError as error:
-        details = "; ".join(
-            ".".join(str(part) for part in item["loc"]) + ": " + item["msg"]
-            for item in error.errors(include_input=False, include_url=False)
-        )
-        return execution_result(
-            False, "Invalid MBPP request: " + details +
-            " No code or tests were executed. Supply non-empty Python code "
-            "and at least one assertion. Import entries must be non-empty.",
-            sandbox_config,
-        ).model_dump_json()
-    result = await execute_mbpp(request)
-    return result.model_dump_json()
+    async def run_tests(
+        self, code: str, test_list: list[str],
+        test_imports: list[str] | None = None,
+    ) -> str:
+        """Test a candidate against supplied assertions in the Deno sandbox.
+
+        Optional test_imports run before the solution and assertions.
+        Returns JSON with success and output, including setup/test errors.
+        Limits come from server configuration. No hidden tests are read.
+        """
+        try:
+            request = MBPPExecutionRequest(
+                code=code, test_list=test_list, config=self.config,
+                test_imports=test_imports if test_imports is not None else [],
+            )
+        except ValidationError as error:
+            details = "; ".join(
+                ".".join(str(part)
+                         for part in item["loc"]) + ": " + item["msg"]
+                for item in error.errors(
+                    include_input=False, include_url=False)
+            )
+            return execution_result(
+                False, "Invalid MBPP request: " + details +
+                " No code or tests were executed. Supply code and assertions; "
+                "import entries must be non-empty.",
+                self.config,
+            ).model_dump_json()
+        result = await execute_mbpp(request)
+        return result.model_dump_json()
 
 
-@mcp.resource("agent://mbpp/task")
 def task_resource() -> dict[str, str]:
     """Server metadata; the caller supplies task code and public tests."""
     return {"runtime": "deno/pyodide",
             "tool": "run_tests(code, test_list, test_imports=None)"}
 
 
-@mcp.prompt()
 def mbpp_solver() -> str:
     return (
         "Solve the MBPP task. Call run_tests(code=solution_code, "
@@ -70,6 +70,17 @@ def mbpp_solver() -> str:
     )
 
 
+def create_server(config: SandboxConfig | None = None) -> FastMCP:
+    server = FastMCP("Agent Smith - MBPP")
+    server.tool(MBPPTools(config).run_tests)
+    server.resource("agent://mbpp/task")(task_resource)
+    server.prompt()(mbpp_solver)
+    return server
+
+
+mcp = create_server()
+
+
 @app.command()
 def main(
     config: Annotated[Path | None, typer.Option(
@@ -79,12 +90,12 @@ def main(
     host: str = "127.0.0.1",
     port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,
 ) -> None:
-    global sandbox_config
+    policy = SandboxConfig()
     if transport not in ("stdio", "http"):
         raise typer.BadParameter("Transport must be stdio or http.")
     if config is not None:
         try:
-            sandbox_config = SandboxConfig.model_validate_json(
+            policy = SandboxConfig.model_validate_json(
                 config.read_text(),
             )
         except (OSError, ValidationError) as error:
@@ -92,10 +103,11 @@ def main(
                 f"Cannot load sandbox configuration: {error}",
                 param_hint="--sandbox-config",
             ) from None
+    server = create_server(policy)
     if transport == "http":
-        mcp.run(transport="http", host=host, port=port, show_banner=False)
+        server.run(transport="http", host=host, port=port, show_banner=False)
     else:
-        mcp.run(transport="stdio", show_banner=False)
+        server.run(transport="stdio", show_banner=False)
 
 
 if __name__ == "__main__":
