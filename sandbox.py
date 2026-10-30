@@ -1,4 +1,5 @@
 import typer
+import re
 import sys
 import asyncio
 import shlex
@@ -86,6 +87,32 @@ def manual(tools: list[Tool] | None) -> str:
     return "\n".join(lines)
 
 
+def run_read_loop() -> None:
+    data = " "
+
+    while (data != "exit" and data != "exit()" and data != ""):
+        data = sys.stdin.read().strip()
+
+        match = re.search(r"\bfinal_answer\s*\(", data)
+
+        if match:
+            start = match.end()
+            depth = 1
+
+            for i in range(start, len(data)):
+                if data[i] == "(":
+                    depth += 1
+                elif data[i] == ")":
+                    depth -= 1
+
+                    if depth == 0:
+                        answer = data[start:i]
+                        print(f"\nSandbox: the final answer is:\n{answer}")
+                        return
+        # -- run the command
+        print("-"*20, "Received command for sandbox:\n", data, "\n", "-"*20)
+
+
 async def sandbox(
         template: Optional[Path] = None,
         mcp_stdio: Optional[str] = None,
@@ -112,13 +139,7 @@ async def sandbox(
 
         typer.echo(manual(tools))
 
-        data = " "
-
-        while (data != "exit" and data != "exit()" and data != ""):
-            data = sys.stdin.read().strip()
-            # -- run the command
-            print("-"*20, "Received command for sandbox:\n",
-                  data, "\n", "-"*20)
+        run_read_loop()
 
         print("Sandbox: Work is complete,",
               "all connections terminate, all resources released. Bye!")
