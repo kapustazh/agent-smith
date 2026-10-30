@@ -112,9 +112,9 @@ async def sandbox(
 
         typer.echo(manual(tools))
 
-        data = ""
+        data = " "
 
-        while (data != "exit" and data != "exit()"):
+        while (data != "exit" and data != "exit()" and data != ""):
             data = sys.stdin.read().strip()
             # -- run the command
             print("-"*20, "Received command for sandbox:\n",
