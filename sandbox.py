@@ -31,8 +31,7 @@ def get_python_type(prop: Any) -> str:
     if "anyOf" in prop:
         options = prop["anyOf"]
         non_null = [p for p in options if p.get("type") != "null"]
-        result = " | ".join(get_python_type(p) for p in non_null)
-        return f"{result} | None" if len(non_null) < len(options) else result
+        return " | ".join(get_python_type(p) for p in non_null)
 
     typ = prop.get("type")
 
@@ -60,10 +59,10 @@ def schema_to_signature(tool: Tool) -> str:
     for name, prop in properties.items():
         typ = get_python_type(prop)
 
-        default = "" if name in required else " = None"
+        default = "" if name in required else " | None = None"
         params.append(f"{name}: {typ}{default}")
 
-    return f"{tool.name}({', '.join(params)})"
+    return f"- {tool.name}({', '.join(params)}): {tool.description})"
 
 
 def manual(tools: list[Tool] | None) -> str:
