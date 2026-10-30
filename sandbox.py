@@ -9,7 +9,7 @@ from pathlib import Path
 from fastmcp import Client
 from mcp.types import Tool
 from fastmcp.client.transports import StdioTransport
-from src.config_model import SandboxConfig
+from src.config_model import SandboxConfig, SandboxIntermediateResult
 
 
 SANDBOX_TEMPLATE_PATH = "src/sandbox_template.json"
@@ -114,10 +114,21 @@ def run_main_loop(sndbx_cnfg: Optional[SandboxConfig]) -> None:
 
         if match:
             answer = extract_final_answer(data, match.end())
-            print(f"\nSandbox: the final answer is:\n{answer}")
+            result = SandboxIntermediateResult(
+                success=True,
+                tool_name="final_answer",
+                sandbox_output=answer.strip("\"\'")
+            )
+            print(result.model_dump_json(indent=2))
             return
+
         # -- run the command
-        print("-"*20, "Received command for sandbox:\n", data, "\n", "-"*20)
+        # print("-"*20, "Received command for sandbox:\n", data, "\n", "-"*20)
+        print(SandboxIntermediateResult(
+            success=True,
+            tool_name=data, # EOF ? exit ?
+            sandbox_output="42"
+        ).model_dump_json(indent=2))
 
 
 async def sandbox(
@@ -154,8 +165,8 @@ async def sandbox(
 
         run_main_loop(sndbx_cnfg)
 
-        print("Sandbox: Work is complete,",
-              "all connections terminate, all resources released. Bye!")
+        # print("Sandbox: Work is complete,",
+        #       "all connections terminate, all resources released. Bye!")
 
 
 @app.command()

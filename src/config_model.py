@@ -62,6 +62,17 @@ class SandboxConfig(BaseModel):
     max_output_bytes: int = Field(default=8192, gt=0, strict=True)
 
 
+class SandboxIntermediateResult(BaseModel):
+    """Represents the intermediate result of a sandbox tool execution."""
+
+    success: bool = Field(
+        description="Whether the tool or function executed successfully")
+    tool_name: str = Field(
+        description="Name of the tool or function that was executed")
+    sandbox_output: str = Field(
+        description="Sandbox execution result (stdout/stderr/error message)")
+
+
 # --- for MBPP and
 
 
