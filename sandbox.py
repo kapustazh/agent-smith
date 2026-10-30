@@ -9,6 +9,7 @@ from pathlib import Path
 from fastmcp import Client
 from mcp.types import Tool
 from fastmcp.client.transports import StdioTransport
+from src.config_model import SandboxConfig
 
 # Init Typer app
 app = typer.Typer(
@@ -87,7 +88,20 @@ def manual(tools: list[Tool] | None) -> str:
     return "\n".join(lines)
 
 
-def run_read_loop() -> None:
+def extract_final_answer(data: str, start: int) -> str:
+    depth = 1
+
+    for i in range(start, len(data)):
+        if data[i] == "(":
+            depth += 1
+        elif data[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return data[start:i]
+    return ""
+
+
+def run_main_loop(sndbx_cnfg: Optional[SandboxConfig]) -> None:
     data = " "
 
     while (data != "exit" and data != "exit()" and data != ""):
@@ -96,19 +110,9 @@ def run_read_loop() -> None:
         match = re.search(r"\bfinal_answer\s*\(", data)
 
         if match:
-            start = match.end()
-            depth = 1
-
-            for i in range(start, len(data)):
-                if data[i] == "(":
-                    depth += 1
-                elif data[i] == ")":
-                    depth -= 1
-
-                    if depth == 0:
-                        answer = data[start:i]
-                        print(f"\nSandbox: the final answer is:\n{answer}")
-                        return
+            answer = extract_final_answer(data, match.end())
+            print(f"\nSandbox: the final answer is:\n{answer}")
+            return
         # -- run the command
         print("-"*20, "Received command for sandbox:\n", data, "\n", "-"*20)
 
@@ -120,6 +124,11 @@ async def sandbox(
     async with AsyncExitStack() as stack:
         tools: Optional[list[Tool]] = None
         client: Optional[Client] = None
+        sndbx_cnfg: Optional[SandboxConfig] = None
+
+        if template:
+            with open(template) as f:
+                sndbx_cnfg = SandboxConfig.model_validate_json(f.read())
 
         if mcp_stdio:
             cmd = shlex.split(mcp_stdio)
@@ -139,7 +148,7 @@ async def sandbox(
 
         typer.echo(manual(tools))
 
-        run_read_loop()
+        run_main_loop(sndbx_cnfg)
 
         print("Sandbox: Work is complete,",
               "all connections terminate, all resources released. Bye!")
