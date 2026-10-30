@@ -194,19 +194,19 @@ def main(
     # -----------
 
     ts: list[ChatCompletionMessageParam] = [
-            {
-                "role": "system",
-                "content": "You are a Python coding assistant.\n"
-                "You must use MCP server via Sandbox.\n"+sandbox_manual,
-            },
-            {
-                "role": "user",
-                "content": f"The task: {the_task.task_definition}\n"
-                f"Function definition: {the_task.function_definition}\n"
-                "Tests: \n ```" + "\n".join(the_task.test_list) + "```\n",
+        {
+            "role": "system",
+            "content": "You are a Python coding assistant.\n"
+            "You must use MCP server via Sandbox.\n"+sandbox_manual,
+        },
+        {
+            "role": "user",
+            "content": f"The task: {the_task.task_definition}\n"
+            f"Function definition: {the_task.function_definition}\n"
+            "Tests: \n ```" + "\n".join(the_task.test_list) + "```\n",
 
-            },
-         ]
+        },
+    ]
 
     print(ts)
 
