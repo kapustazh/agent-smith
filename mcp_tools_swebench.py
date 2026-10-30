@@ -36,11 +36,25 @@ class SWEBenchMCP:
              "Find Python references and aliases at a 1-based source line."),
         ):
             self.server.tool(method, description=description)
-        self.server.tool(self.run_command)
-        self.server.tool(self.run_tests)
-        self.server.tool(self.get_patch)
-        self.server.resource("agent://swebench/task")(self.task_resource)
-        self.server.prompt()(self.swebench_solver)
+        self.server.tool(self.run_command, description=(
+            "Run a container command and return output and exit code."
+        ))
+        self.server.tool(self.run_tests, description=(
+            "Run eval_script with the prepared environment on a disposable "
+            "copy.\n\nReturns script logs and exit_code, not a benchmark "
+            "verdict."
+        ))
+        self.server.tool(self.get_patch, description=(
+            "Get a patch against the original commit, including new files."
+            "\n\nOversized patches return an error instead of an incomplete "
+            "patch."
+        ))
+        self.server.resource("agent://swebench/task", description=(
+            "Task metadata and execution configuration status."
+        ))(self.task_resource)
+        self.server.prompt(description=(
+            "Instructions for solving the task with these tools."
+        ))(self.swebench_solver)
 
     async def call_repository(
         self, method: Callable[..., str], *args: Any,
@@ -51,7 +65,6 @@ class SWEBenchMCP:
             try:
                 return await asyncio.shield(work)
             finally:
-                # Cancellation cannot release the lock while a thread edits.
                 with CancelScope(shield=True):
                     await work
 
@@ -110,25 +123,15 @@ class SWEBenchMCP:
     async def run_command(
         self, command: str, workdir: str = "/testbed",
     ) -> str:
-        """Run a container command and return output and exit code."""
         return await self.execution().run_command(command, workdir)
 
     async def run_tests(self) -> str:
-        """Run eval_script with the prepared environment on a disposable copy.
-
-        Returns script logs and exit_code, not a benchmark verdict.
-        """
         return await self.execution().run_tests()
 
     async def get_patch(self) -> str:
-        """Get a patch against the original commit, including new files.
-
-        Oversized patches return an error instead of an incomplete patch.
-        """
         return await self.execution().get_patch()
 
     def task_resource(self) -> dict[str, str]:
-        """Task metadata and execution configuration status."""
         if self.session is None:
             return {"execution": "requires --task-file",
                     "repository": str(self.repository.root)}
@@ -137,7 +140,6 @@ class SWEBenchMCP:
                 "repository": "/testbed", "execution": "docker"}
 
     def swebench_solver(self) -> str:
-        """Instructions for solving the task with these tools."""
         return (
             "Inspect the task and repository. Edit the source, run_tests(), "
             "read the test logs even when exit_code is zero, and get_patch(). "

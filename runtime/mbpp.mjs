@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { loadPyodide } from "../node_modules/pyodide/pyodide.mjs";
 
-// Node/npm installs assets; only permission-restricted Deno executes candidates.
 const request = JSON.parse(readFileSync(0, "utf8"));
 const driver = readFileSync(
   new URL("./mbpp_driver.py", import.meta.url),
@@ -42,7 +41,6 @@ try {
   python.globals.delete("_config_json");
   python.globals.delete("_emit");
   write(encoder.encode(request.token + "\n"));
-  // The test list and completion token remain in the JavaScript supervisor.
   const imports = (request.test_imports ?? []).join("\n");
   let passed = !imports || runtime.execute(imports, "<test imports>");
   if (passed) passed = runtime.execute(request.code, "<solution>");

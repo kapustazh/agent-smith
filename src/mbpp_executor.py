@@ -1,5 +1,3 @@
-"""MBPP candidate execution boundary shared with the sandbox configuration."""
-
 import asyncio
 import json
 from pathlib import Path
@@ -45,7 +43,6 @@ class MBPPExecutionResult(BaseModel):
 def execution_result(
     success: bool, output: str, config: SandboxConfig, diagnostic: str = "",
 ) -> MBPPExecutionResult:
-    """Apply the byte budget to every result, including preflight errors."""
     limit = config.max_output_bytes
     data = output.encode("utf-8", "replace")
     if len(data) > limit and not diagnostic:
@@ -61,7 +58,6 @@ def execution_result(
 
 
 async def execute_mbpp(request: MBPPExecutionRequest) -> MBPPExecutionResult:
-    """Execute in a fresh offline Deno process, never in the MCP process."""
     deno = shutil.which("deno")
     if deno is None:
         return execution_result(
@@ -147,8 +143,6 @@ class MBPPExecutor:
     async def monitor_memory(self) -> None:
         assert self.process is not None
         try:
-            # shortcut: RSS sampling can miss spikes; use OS limits for a hard
-            # cap.
             while self.process.returncode is None:
                 result = await capture([
                     "ps", "-o", "rss=", "-p", str(self.process.pid),
@@ -223,7 +217,6 @@ class MBPPExecutor:
             with tempfile.TemporaryDirectory(prefix="mbpp-") as directory:
                 try:
                     await self.start(directory)
-                    # Startup and candidate execution have separate watchdogs.
                     await asyncio.wait_for(self.initialize(), 30)
                     assert self.process is not None
                     try:

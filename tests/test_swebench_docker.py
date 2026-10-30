@@ -85,7 +85,6 @@ class DockerTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(staged["stdout"], "")
         patch_command = "git apply --check - <<'PATCH'\n" + patch + "PATCH\n"
-        # Reverse the edit before checking that the generated patch applies.
         await self.session.run_command(
             "git -c safe.directory=/testbed checkout -- calc.py; "
             "unlink extra.py",

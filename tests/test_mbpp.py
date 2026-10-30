@@ -1,5 +1,3 @@
-"""Contract, real Deno isolation, lifecycle, and MCP transport checks."""
-
 import asyncio
 from pathlib import Path
 import shutil

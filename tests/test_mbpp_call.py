@@ -1,5 +1,3 @@
-"""Task imports, actionable errors, and the subject's public MCP contract."""
-
 import asyncio
 import json
 from pathlib import Path

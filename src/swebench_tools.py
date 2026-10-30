@@ -319,7 +319,6 @@ class RepositoryTools:
                 "The supplied line must contain exactly one occurrence "
                 "of the identifier outside comments and strings.",
             )
-        # Jedi reads paths itself: give it a fresh copy of verified files only.
         with tempfile.TemporaryDirectory(prefix="smith-references-") as folder:
             snapshot = Path(folder).resolve()
             aliases = self._snapshot_python(snapshot)
@@ -379,7 +378,6 @@ class RepositoryTools:
         definitions: set[tuple[Path | None, int | None, int | None]],
     ) -> list[jedi.api.classes.Name]:
         references = []
-        # Jedi searches one spelling at a time; include import aliases.
         for filename, number, alias in aliases:
             imported = jedi.Script(path=filename, project=project)
             for symbol in imported.get_names(all_scopes=True):

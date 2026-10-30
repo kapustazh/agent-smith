@@ -179,7 +179,6 @@ class DockerSession:
             image = "smith-swe-eval-" + uuid4().hex
             self.images.add(image)
             try:
-                # Commits preserve dependencies but exclude the /testbed mount.
                 await self._control("commit", self.container, image)
                 return await self._run_evaluation(image)
             finally:

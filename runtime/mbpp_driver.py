@@ -1,5 +1,3 @@
-"""Restricted MBPP Python; loaded only inside the Deno/Pyodide process."""
-
 import ast
 import builtins
 from functools import partial
@@ -84,7 +82,6 @@ class CandidateGate(ast.NodeTransformer):
         return self.generic_visit(node)
 
 
-# Plain functions prevent deepcopy from copying the supervisor through self.
 def candidate_import(
     name: str, globals: Any = None, locals: Any = None,
     fromlist: tuple[str, ...] = (), level: int = 0,
@@ -150,7 +147,6 @@ class CandidateRuntime:
         sys.stdout = sys.stderr = Output(emit)
         sys.stdin = io.StringIO("")
         self.modules = self.load_modules()
-        # CPython datetime imports this helper via the caller's builtins.
         self.strptime = importlib.import_module("_strptime")
         datetime = importlib.import_module("datetime")
         datetime.datetime.strptime("2000", "%Y")

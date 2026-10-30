@@ -1,5 +1,3 @@
-"""MBPP MCP tools backed by the configured Deno sandbox executor."""
-
 from pathlib import Path
 from typing import Annotated
 
@@ -24,12 +22,6 @@ class MBPPTools:
         self, code: str, test_list: list[str],
         test_imports: list[str] | None = None,
     ) -> str:
-        """Test a candidate against supplied assertions in the Deno sandbox.
-
-        Optional test_imports run before the solution and assertions.
-        Returns JSON with success and output, including setup/test errors.
-        Limits come from server configuration. No hidden tests are read.
-        """
         try:
             request = MBPPExecutionRequest(
                 code=code, test_list=test_list, config=self.config,
@@ -53,7 +45,6 @@ class MBPPTools:
 
 
 def task_resource() -> dict[str, str]:
-    """Server metadata; the caller supplies task code and public tests."""
     return {"runtime": "deno/pyodide",
             "tool": "run_tests(code, test_list, test_imports=None)"}
 
@@ -72,8 +63,15 @@ def mbpp_solver() -> str:
 
 def create_server(config: SandboxConfig | None = None) -> FastMCP:
     server = FastMCP("Agent Smith - MBPP")
-    server.tool(MBPPTools(config).run_tests)
-    server.resource("agent://mbpp/task")(task_resource)
+    server.tool(MBPPTools(config).run_tests, description=(
+        "Test a candidate against supplied assertions in the Deno sandbox."
+        "\n\nOptional test_imports run before the solution and assertions.\n"
+        "Returns JSON with success and output, including setup/test errors.\n"
+        "Limits come from server configuration. No hidden tests are read."
+    ))
+    server.resource("agent://mbpp/task", description=(
+        "Server metadata; the caller supplies task code and public tests."
+    ))(task_resource)
     server.prompt()(mbpp_solver)
     return server
 
