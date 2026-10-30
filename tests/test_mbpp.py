@@ -284,6 +284,29 @@ assert "{value}".format_map({"value": "ok"}) == "ok"
 ''')
         self.assertTrue(result["success"], result)
 
+    async def test_deepcopy_cannot_replace_the_test_executor(self) -> None:
+        for entrypoint in ("type", '"{}".format'):
+            with self.subTest(entrypoint=entrypoint):
+                result = await self.run_code(
+                    "from copy import deepcopy\n"
+                    "memo = {}\n"
+                    "try:\n"
+                    f"    deepcopy({entrypoint}, memo)\n"
+                    "except Exception:\n"
+                    "    pass\n"
+                    "for value in list(memo.values()):\n"
+                    "    try:\n"
+                    "        runner_type = type(value)\n"
+                    "        execute = runner_type.execute\n"
+                    "    except AttributeError:\n"
+                    "        continue\n"
+                    "    runner_type.execute = lambda *args: True\n"
+                    "def solve(): return 0\n",
+                    ["assert solve() == 42"],
+                )
+                self.assertFalse(result["success"], result)
+                self.assertIn("AssertionError", result["output"])
+
     async def test_reflection_and_transitive_capabilities_are_denied(
         self,
     ) -> None:
@@ -318,6 +341,9 @@ while frame:
             'globals()',
             'g = (x for x in [1])\ng.gi_frame',
             'import typing\ntyping.get_type_hints(type)',
+            'import typing\ntyping.get_origin(typing.Type)('
+            '"Injected", (object,), {})',
+            'import typing\ntyping.get_args(typing.List[int])',
             'import functools\nfunctools.update_wrapper(open, print)',
             'import functools\nfunctools.singledispatch(print)',
             'import _strptime\n_strptime.sys.modules',

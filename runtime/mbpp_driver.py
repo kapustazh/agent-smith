@@ -84,17 +84,56 @@ class CandidateGate(ast.NodeTransformer):
         return self.generic_visit(node)
 
 
-class CandidateFormatter(string.Formatter):
-    def __init__(self, runtime: "CandidateRuntime") -> None:
-        self.runtime = runtime
+# Plain functions prevent deepcopy from copying the supervisor through self.
+def candidate_import(
+    name: str, globals: Any = None, locals: Any = None,
+    fromlist: tuple[str, ...] = (), level: int = 0,
+) -> Any:
+    if name == "_strptime" and _runtime.allowed("datetime"):
+        return _runtime.strptime
+    if level or name not in _runtime.modules:
+        raise ImportError("Import denied: " + name)
+    module = _runtime.modules[name]
+    for member in fromlist or ():
+        if member != "*" and (member.startswith("_") or
+                              not hasattr(module, member)):
+            raise ImportError("Import denied: " + name + "." + member)
+    return module if fromlist else _runtime.modules[name.split(".")[0]]
 
+
+def candidate_attribute(value: Any, name: str) -> Any:
+    if name.startswith("_") or name in CandidateGate.blocked:
+        raise PermissionError("Attribute access denied: " + name)
+    if name in ("format", "format_map"):
+        if isinstance(value, str):
+            return partial(candidate_format, name, value)
+        if isinstance(value, type) and issubclass(value, str):
+            return partial(candidate_format, name)
+    return getattr(value, name)
+
+
+def candidate_format(
+    method: str, text: str, *args: Any, **kwargs: Any,
+) -> str:
+    mapping = args[0] if method == "format_map" else kwargs
+    return CandidateFormatter().vformat(
+        text, () if method == "format_map" else args, mapping,
+    )
+
+
+def candidate_type(value: Any) -> Any:
+    result = type(value)
+    return candidate_type if result is type else result
+
+
+class CandidateFormatter(string.Formatter):
     def get_field(
         self, field_name: str, args: Any, kwargs: Any,
     ) -> tuple[Any, Any]:
         first, rest = _string.formatter_field_name_split(field_name)
         value = self.get_value(first, args, kwargs)
         for attribute, key in rest:
-            value = (self.runtime.attribute(value, key) if attribute else
+            value = (candidate_attribute(value, key) if attribute else
                      value[key])
         return value, first
 
@@ -117,7 +156,7 @@ class CandidateRuntime:
         datetime.datetime.strptime("2000", "%Y")
         self.namespace = {"__name__": "mbpp_candidate",
                           "__builtins__": self.builtins(),
-                          "_sandbox_attribute": self.attribute}
+                          "_sandbox_attribute": candidate_attribute}
         sys.addaudithook(self.audit)
 
     def allowed(self, name: str) -> bool:
@@ -147,7 +186,7 @@ class CandidateRuntime:
             "Final Generic IO Literal NewType NoReturn Optional ParamSpec "
             "Protocol SupportsAbs SupportsBytes SupportsComplex "
             "SupportsFloat SupportsIndex SupportsInt SupportsRound Text "
-            "TextIO Tuple Type TypeVar Union cast get_args get_origin "
+            "TextIO Tuple Type TypeVar Union cast "
             "runtime_checkable TYPE_CHECKING List Dict Set FrozenSet "
             "DefaultDict Deque Counter ChainMap OrderedDict Sequence "
             "MutableSequence Mapping MutableMapping Iterable Iterator "
@@ -180,43 +219,6 @@ class CandidateRuntime:
                 setattr(modules[parent], child, module)
         return modules
 
-    def import_module(
-        self, name: str, globals: Any = None, locals: Any = None,
-        fromlist: tuple[str, ...] = (), level: int = 0,
-    ) -> Any:
-        if name == "_strptime" and self.allowed("datetime"):
-            return self.strptime
-        if level or name not in self.modules:
-            raise ImportError("Import denied: " + name)
-        module = self.modules[name]
-        for member in fromlist or ():
-            if member != "*" and (member.startswith("_") or
-                                  not hasattr(module, member)):
-                raise ImportError("Import denied: " + name + "." + member)
-        return module if fromlist else self.modules[name.split(".")[0]]
-
-    def attribute(self, value: Any, name: str) -> Any:
-        if name.startswith("_") or name in CandidateGate.blocked:
-            raise PermissionError("Attribute access denied: " + name)
-        if name in ("format", "format_map"):
-            if isinstance(value, str):
-                return partial(self.format_string, name, value)
-            if isinstance(value, type) and issubclass(value, str):
-                return partial(self.format_string, name)
-        return getattr(value, name)
-
-    def format_string(
-        self, method: str, text: str, *args: Any, **kwargs: Any,
-    ) -> str:
-        mapping = args[0] if method == "format_map" else kwargs
-        return CandidateFormatter(self).vformat(
-            text, () if method == "format_map" else args, mapping,
-        )
-
-    def type_of(self, value: Any) -> Any:
-        result = type(value)
-        return self.type_of if result is type else result
-
     def builtins(self) -> dict[str, Any]:
         safe = {name: getattr(builtins, name) for name in (
             "abs all any ascii bin bool bytearray bytes callable chr "
@@ -230,7 +232,7 @@ class CandidateRuntime:
         safe.update({name: value for name, value in vars(builtins).items()
                      if isinstance(value, type) and
                      issubclass(value, BaseException)})
-        safe.update({"__import__": self.import_module, "type": self.type_of,
+        safe.update({"__import__": candidate_import, "type": candidate_type,
                      "__build_class__": builtins.__build_class__})
         return safe
 
@@ -287,4 +289,5 @@ class CandidateRuntime:
         print("".join(report.format()), end="", file=sys.stderr)
 
 
-CandidateRuntime(globals()["_config_json"], globals()["_emit"])
+_runtime = CandidateRuntime(globals()["_config_json"], globals()["_emit"])
+_runtime

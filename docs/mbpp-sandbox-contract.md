@@ -126,7 +126,8 @@ Python-to-JavaScript imports are denied. `type` supports inspection, not dynamic
 class construction. Standard classes, functions, recursion, comprehensions,
 annotations, public string formatting and `datetime.strptime` remain supported.
 Helpers that implicitly evaluate annotations or traverse arbitrary attributes
-(`typing.get_type_hints`, `operator.attrgetter`/`methodcaller`, raw
+(`typing.get_type_hints`/`get_origin`/`get_args`,
+`operator.attrgetter`/`methodcaller`, raw
 `string.Formatter`, and `functools.update_wrapper`/`wraps`/`singledispatch`) are
 not exported. These restrictions also apply to task imports and assertions.
 
