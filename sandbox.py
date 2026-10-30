@@ -11,6 +11,10 @@ from mcp.types import Tool
 from fastmcp.client.transports import StdioTransport
 from src.config_model import SandboxConfig
 
+
+SANDBOX_TEMPLATE_PATH = "src/sandbox_template.json"
+
+
 # Init Typer app
 app = typer.Typer(
     add_completion=False,
@@ -125,9 +129,10 @@ async def sandbox(
         client: Optional[Client] = None
         sndbx_cnfg: Optional[SandboxConfig] = None
 
-        if template:
-            with open(template) as f:
-                sndbx_cnfg = SandboxConfig.model_validate_json(f.read())
+        if not template:
+            template = Path(SANDBOX_TEMPLATE_PATH)
+        with open(template) as f:
+            sndbx_cnfg = SandboxConfig.model_validate_json(f.read())
 
         if mcp_stdio:
             cmd = shlex.split(mcp_stdio)
