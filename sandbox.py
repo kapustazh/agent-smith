@@ -52,8 +52,8 @@ def parse_tool_call(source: str) -> ParsedCall:
     if not isinstance(expression.func, ast.Name):
         raise ValueError("Only direct function calls are allowed")
 
-    if expression.args:
-        raise ValueError("Positional arguments are not allowed")
+    # if expression.args:
+    #     raise ValueError("Positional arguments are not allowed")
 
     arguments: dict[str, Any] = {}
 
@@ -148,6 +148,17 @@ async def dispatch_tool_call(
         success=True,
         tool_name=call.name,
         sandbox_output=str(result)
+    )
+
+
+def is_single_direct_call(source: str) -> bool:
+    tree = ast.parse(source.strip(), mode="exec")
+
+    return (
+        len(tree.body) == 1
+        and isinstance(tree.body[0], ast.Expr)
+        and isinstance(tree.body[0].value, ast.Call)
+        and isinstance(tree.body[0].value.func, ast.Name)
     )
 
 
@@ -398,42 +409,49 @@ class Sandbox:
                     break
                 data += d
 
-            data = data.strip()
+            for line in data.splitlines():
+                line = line.strip()
 
-            if not data or data in ("exit", "exit()"):
-                # TODO: some quit function
-                print("Sandbox: Work complete,",
-                      "all connections terminated,",
-                      "all resources released. Bye!")
-                return
-            elif data in ("manual", "manual()"):
-                self.show_manual()
-                continue
-            elif data in ("show_tools", "show_tools()"):
-                result = SandboxIntermediateResult(
-                    success=True,
-                    tool_name="show_tools",
-                    sandbox_output=self.show_tools()
-                )
+                if not line or line in ("exit", "exit()"):
+                    # TODO: some quit function
+                    print("Sandbox: Work complete,",
+                          "all connections terminated,",
+                          "all resources released. Bye!")
+                    return
+                if line in ("manual", "manual()"):
+                    self.show_manual()
+                    continue
+                if line in ("show_tools", "show_tools()"):
+                    result = SandboxIntermediateResult(
+                        success=True,
+                        tool_name="show_tools",
+                        sandbox_output=self.show_tools()
+                    )
+                    print(result.model_dump_json())
+                    sys.stdout.flush()
+                    continue
+
+                call: Optional[ParsedCall] = None
+
+                try:
+                    if is_single_direct_call(line):
+                        call = parse_tool_call(line)
+
+                        result = await dispatch_tool_call(
+                            call,
+                            self.tool_registry,
+                            self.client
+                        )
+                    else:
+                        result = self.run_python(line)
+                except Exception as e:
+                    result = SandboxIntermediateResult(
+                        success=False,
+                        tool_name=call.name if call else "sandbox",
+                        sandbox_output=str(e)
+                    )
                 print(result.model_dump_json())
                 sys.stdout.flush()
-                continue
-
-            try:
-                call = parse_tool_call(data)
-                result = await dispatch_tool_call(
-                    call,
-                    self.tool_registry,
-                    self.client
-                )
-            except Exception as e:
-                result = SandboxIntermediateResult(
-                    success=False,
-                    tool_name="some tool",  # TODO: fix name
-                    sandbox_output=str(e)
-                )
-            print(result.model_dump_json())
-            sys.stdout.flush()
 
 
 async def sandbox_main(
