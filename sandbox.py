@@ -7,6 +7,8 @@ import resource
 import subprocess
 import builtins
 import os
+import selectors
+import time
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 from contextlib import AsyncExitStack
@@ -380,6 +382,69 @@ class Sandbox:
 
         return builtins.open(path, mode, *args, **kwargs)
 
+    def _read_process_output(
+        self,
+        process: subprocess.Popen[bytes]
+    ) -> tuple[bytes, bool, bool]:
+        assert self.config is not None
+
+        selector = selectors.DefaultSelector()
+        streams = {
+            process.stdout: bytearray(),
+            process.stderr: bytearray()
+        }
+
+        for stream in streams:
+            assert stream is not None
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ)
+
+        deadline = time.monotonic() + self.config.max_execution_time_seconds
+        output_limit = self.config.max_output_bytes
+        total_bytes = 0
+        truncated = False
+        timed_out = False
+
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+
+            if remaining <= 0:
+                timed_out = True
+                process.kill()
+                break
+
+            for key, _ in selector.select(remaining):
+                stream = key.fileobj
+                chunk = stream.read(4096)
+
+                if not chunk:
+                    selector.unregister(stream)
+                    continue
+
+                available = output_limit - total_bytes
+
+                if available > 0:
+                    streams[stream].extend(chunk[:available])
+                    total_bytes += min(len(chunk), available)
+
+                if len(chunk) > available:
+                    truncated = True
+
+        if timed_out:
+            process.kill()
+
+        process.wait()
+
+        for stream in list(selector.get_map().values()):
+            selector.unregister(stream.fileobj)
+
+        return (
+            bytes(streams[process.stdout]),
+            bytes(streams[process.stderr]),
+            timed_out,
+            truncated
+        )
+
     def restricted_builtins(self) -> dict[str, Any]:
         allowed_names = {
             "abs",
@@ -409,7 +474,7 @@ class Sandbox:
             "Exception",
             "ValueError",
             "TypeError",
-            "RuntimeError",
+            "RuntimeError"
         }
 
         restricted = {
@@ -428,7 +493,7 @@ class Sandbox:
     ) -> dict[str, Any]:
         namespace: dict[str, Any] = {
             "__builtins__": self.restricted_builtins(),
-            "final_answer": final_answer,
+            "final_answer": final_answer
         }
 
         for name in tools:
@@ -483,8 +548,6 @@ class Sandbox:
 
         try:
             self.validate_python_source(source)
-        except (KeyboardInterrupt, SystemExit):
-            raise
         except (SyntaxError, ValueError, RuntimeError) as e:
             return SandboxIntermediateResult(
                 success=False,
@@ -493,30 +556,20 @@ class Sandbox:
             )
 
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 [sys.executable, "-I", "-c", source],
                 cwd=self._execution_directory(),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                timeout=self.config.max_execution_time_seconds,
                 preexec_fn=self._limits
+            )
+
+            stdout, stderr, timed_out, truncated = self._read_process_output(
+                process
             )
         except (KeyboardInterrupt, SystemExit):
             raise
-        except subprocess.TimeoutExpired as e:
-            partial_output = e.stdout or ""
-
-            return SandboxIntermediateResult(
-                success=False,
-                tool_name="python",
-                sandbox_output=(
-                    "Execution timed out. " +
-                    f"Partial output:\n{partial_output}"
-                    if partial_output else ""
-                )
-            )
         except OSError as e:
             return SandboxIntermediateResult(
                 success=False,
@@ -524,19 +577,25 @@ class Sandbox:
                 sandbox_output=f"Execution failed: {e}"
             )
 
-        output = completed.stdout
+        output = stdout or stderr
+        text = output.decode("utf-8", errors="replace")
 
-        if completed.returncode != 0:
+        if timed_out:
+            text = f"Execution timed out. Partial output:\n{text}"
+
+        if truncated:
+            text += "\nOutput truncated due to configured size limits."
+
+        if process.returncode != 0 and not timed_out:
             return SandboxIntermediateResult(
                 success=False,
                 tool_name="python",
-                sandbox_output=completed.stderr or output
+                sandbox_output=text
             )
-
         return SandboxIntermediateResult(
-            success=True,
+            success=not timed_out,
             tool_name="python",
-            sandbox_output=output
+            sandbox_output=text
         )
 
     async def read_command(self) -> str | None:
@@ -588,15 +647,15 @@ class Sandbox:
             call: Optional[ParsedCall] = None
 
             try:
-                # if is_single_direct_call(data):
-                #     call = parse_tool_call(data)
-                #     result = await dispatch_tool_call(
-                #         call,
-                #         self.tool_registry,
-                #         self.client
-                #     )
-                # else:
-                #     result = self.run_python(data)
+                if is_single_direct_call(data):
+                    call = parse_tool_call(data)
+                    result = await dispatch_tool_call(
+                        call,
+                        self.tool_registry,
+                        self.client
+                    )
+                else:
+                    result = self.run_python(data)
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as e:
