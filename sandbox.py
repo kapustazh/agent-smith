@@ -34,13 +34,13 @@ class ParsedCall:
 
 
 class FinalAnswerSignal(Exception):
-    def __init__(self, value: str) -> None:
-        self.value = value
+    def __init__(self, answer: str) -> None:
+        self.answer = answer
         super().__init__("final_answer called")
 
 
-def final_answer(value: Any) -> None:
-    raise FinalAnswerSignal(str(value))
+def final_answer(answer: Any) -> None:
+    raise FinalAnswerSignal(str(answer))
 
 
 def make_mcp_wrapper(
@@ -500,6 +500,35 @@ class Sandbox:
             namespace[name] = mcp_wrappers[name]
 
         return namespace
+
+    def execute_in_namespace(
+        self,
+        source: str
+    ) -> SandboxIntermediateResult:
+        namespace = self.build_execution_namespace()
+
+        try:
+            exec(compile(source, "<sandbox>", "exec"), namespace, namespace)
+        except FinalAnswerSignal as signal:
+            return SandboxIntermediateResult(
+                success=True,
+                tool_name="final_answer",
+                sandbox_output=str(signal.answer)
+            )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            return SandboxIntermediateResult(
+                success=False,
+                tool_name="python",
+                sandbox_output=str(exc)
+            )
+
+        return SandboxIntermediateResult(
+            success=True,
+            tool_name="python",
+            sandbox_output=""
+        )
 
     def show_manual(self) -> None:
         print(manual(list(self.tool_registry.values())))
