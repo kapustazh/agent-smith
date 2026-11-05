@@ -506,7 +506,7 @@ class Sandbox:
         sys.stdout.flush()
 
     def show_tools(self) -> list[str]:
-        tools = ["final_answer", "show_tools", "print"]
+        tools = ["final_answer", "show_tools"]
         tools.extend([t for t in self.tool_registry])
         return tools
 
@@ -615,34 +615,28 @@ class Sandbox:
         while True:
             data = await self.read_command()
 
-            # while (True):
-            #     d = await asyncio.to_thread(sys.stdin.readline)
-            #     if not d or d.strip() == COMMAND_END_MARKER:
-            #         break
-            #     data += d
-
-            # for line in data.splitlines():
-            #     line = line.strip()
-
-            if not data or data in EXIT_COMMANDS:
+            if data is None or data in EXIT_COMMANDS:
                 # TODO: some quit function
                 print("Sandbox: Work complete,",
                         "all connections terminated,",
                         "all resources released. Bye!")
                 return
 
-            # if line in ("manual", "manual()"):
-            #     self.show_manual()
-            #     continue
-            # if line in ("show_tools", "show_tools()"):
-            #     result = SandboxIntermediateResult(
-            #         success=True,
-            #         tool_name="show_tools",
-            #         sandbox_output=self.show_tools()
-            #     )
-            #     print(result.model_dump_json())
-            #     sys.stdout.flush()
-            #     continue
+            if not data:
+                continue
+
+            if data in ("manual", "manual()"):
+                self.show_manual()
+                continue
+            if data in ("show_tools", "show_tools()"):
+                result = SandboxIntermediateResult(
+                    success=True,
+                    tool_name="show_tools",
+                    sandbox_output=self.show_tools()
+                )
+                print(result.model_dump_json())
+                sys.stdout.flush()
+                continue
 
             call: Optional[ParsedCall] = None
 
