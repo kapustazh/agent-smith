@@ -162,6 +162,8 @@ async def dispatch_tool_call(
             call.name,
             call.arguments
         )
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except Exception as exc:
         return SandboxIntermediateResult(
             success=False,
@@ -481,6 +483,8 @@ class Sandbox:
 
         try:
             self.validate_python_source(source)
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except (SyntaxError, ValueError, RuntimeError) as e:
             return SandboxIntermediateResult(
                 success=False,
@@ -499,6 +503,8 @@ class Sandbox:
                 timeout=self.config.max_execution_time_seconds,
                 preexec_fn=self._limits
             )
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except subprocess.TimeoutExpired as e:
             partial_output = e.stdout or ""
 
@@ -591,6 +597,8 @@ class Sandbox:
                 #     )
                 # else:
                 #     result = self.run_python(data)
+            except (KeyboardInterrupt, SystemExit):
+                raise
             except Exception as e:
                 result = SandboxIntermediateResult(
                     success=False,
