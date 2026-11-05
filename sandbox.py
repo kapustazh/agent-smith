@@ -82,12 +82,12 @@ def validate_tool_call(
     tool_registry: dict[str, Tool]
 ) -> Tool | None:
     if call.name == "final_answer":
-        if set(call.arguments) != {"answer"}:
+        if len(call.arguments) != 1:
             raise ValueError(
-                "final_answer requires exactly one argument: answer"
+                "final_answer requires exactly one argument"
             )
-        if not isinstance(call.arguments["answer"], str):
-            raise ValueError("final_answer.answer must be a string")
+        # if not isinstance(call.arguments["answer"], str):
+        #     raise ValueError("final_answer.answer must be a string")
         return None
 
     tool = tool_registry.get(call.name)
@@ -211,7 +211,7 @@ def manual(tools: list[Tool] | None) -> str:
         "- Positional arguments are rejected for MCP tools;" +
         "use keyword arguments.\n",
         "Available tools:",
-        "- final_answer(answer: str): terminate the agent loop and " +
+        "- final_answer(answer: Any): terminate the agent loop and " +
         "return the solution."
         # "- show_tools(): show available tool names",
         # "- print(text: str): print a result"
