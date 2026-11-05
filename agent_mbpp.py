@@ -10,6 +10,7 @@ import typer
 from src.llm_connector import ProviderConfig, LLMConnector
 from src.config_model import MBPPTaskInput
 from src.sandbox_connector import SandboxClient
+from src.agent_utils import mpc_arguments_to_python
 
 from openai.types.chat import ChatCompletionMessageParam
 
@@ -181,7 +182,7 @@ def main(
     try:
         sandbox = SandboxClient('--mcp-stdio "uv run mcp_tools_mbpp.py"')
         sandbox.read_std(5)  # clear stdout from sandbox
-        sandbox_manual = sandbox.request("manual()",5)
+        sandbox_manual = sandbox.request("manual()", 5)
     except Exception as ex:
         typer.secho(
             f"Error: Can`t run sandbox'!\n{ex}",
@@ -191,7 +192,7 @@ def main(
 
     if not sandbox_manual:
         typer.secho(
-            f"Error: Can`t get manual from sandbox '!\n",
+            "Error: Can`t get manual from sandbox '!\n",
             fg=typer.colors.RED, err=True)
         typer.Exit(code=1)
         return
@@ -201,15 +202,14 @@ def main(
     # t_str = sandbox.request("show_tools()", 5)
     # print("-- test:", t_str)
 
-
     try:
         sandbox_tools_list = sandbox.run_tool("show_tools()").sandbox_output
     except Exception as ex:
-       typer.secho(
+        typer.secho(
             f"Error: Can`t get show_tools() in sandbox'!\n{ex}",
             fg=typer.colors.RED, err=True)
-       typer.Exit(code=1)
-       return
+        typer.Exit(code=1)
+        return
 
     print("-"*10, " Sandbox tools:\n", sandbox_tools_list, "\n")
 
@@ -236,7 +236,7 @@ def main(
     ]
 
     # print("-"*10, " Sandbox manual:\n", sandbox_manual)
-    
+
     print("-"*10, " Prompt:")
 
     print(ts)
@@ -248,15 +248,13 @@ def main(
             extra_body={"reasoning": {"effort": "none"}},
         )
     except Exception as ex:
-       typer.secho(
-            f"Error: Can`t get llm response'!\n",
+        typer.secho(
+            "Error: Can`t get llm response'!\n",
             fg=typer.colors.RED, err=True)
-       typer.secho(ex, err=True)
-
-       sandbox.close()
-       typer.Exit(code=1)
-       return
-
+        typer.secho(ex, err=True)
+        sandbox.close()
+        typer.Exit(code=1)
+        return
 
     usage = response.usage
     if usage is not None:
@@ -271,15 +269,40 @@ def main(
 
     # -----------
     print("+"*10)
-    print("LLM tool_calls:")
-    print(response.choices[0].message.tool_calls)
-    # -----------
-    print("+"*10)
     print("LLM reasoning:")
     print(response.choices[0].message.reasoning)
 
     print("+"*10, "full llm response:")
     print(response)
+    print("+"*10)
+
+    # -----------
+    # print("+"*10)
+    print("LLM tool_calls:")
+    print(response.choices[0].message.tool_calls)
+    print("+"*10)
+
+    # If llm request tools via standard interface
+    for tool_call in response.choices[0].message.tool_calls:
+        print("-- Tool:", tool_call)
+
+        if tool_call.type == 'function':
+            call_id = tool_call.id
+            tool_name = str(tool_call.function.name).strip()
+            if tool_name not in sandbox_tools_list:
+                print(f"Tool (name={tool_name}) not found!")
+                continue
+            arg_str = ""
+            if tool_call.function.arguments:
+                arg_str = mpc_arguments_to_python(tool_call.function.arguments)
+            sb_call = f"{tool_name}({arg_str})"
+            print(" - call_id:", call_id)
+            print(" - call:", sb_call)
+            tool_result = sandbox.run_tool(sb_call).sandbox_output
+            print(" - result:", tool_result)
+        else:
+            print("LLM try to call not supported type of call tool "
+                  f"(type={tool_call.type}).")
 
     # -----------
     typer.echo("✅ Done!")
