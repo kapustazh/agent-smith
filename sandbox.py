@@ -9,7 +9,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 from contextlib import AsyncExitStack
 from types import TracebackType
-from typing import Optional, Any, Type
+from typing import Optional, Any, Type, Callable
 from pathlib import Path
 from fastmcp import Client
 from mcp.types import Tool
@@ -19,12 +19,50 @@ from src.config_model import SandboxConfig, SandboxIntermediateResult
 
 
 SANDBOX_TEMPLATE_PATH = "src/sandbox_template.json"
+COMMAND_END_MARKER = "<<<END_COMMAND>>>"
+EXIT_COMMANDS = {"exit", "exit()"}
 
 
 @dataclass(frozen=True)
 class ParsedCall:
     name: str
     arguments: dict[str, Any]
+
+
+class FinalAnswerSignal(Exception):
+    def __init__(self, value: Any) -> None:
+        self.value = value
+        super().__init__("final_answer called")
+
+
+def final_answer(value: Any) -> None:
+    raise FinalAnswerSignal(value)
+
+
+def build_execution_namespace(
+    tools: dict[str, Tool],
+    mcp_wrappers: dict[str, Callable[..., Any]],
+) -> dict[str, Any]:
+    namespace: dict[str, Any] = {
+        "__builtins__": restricted_builtins(),
+        "final_answer": final_answer,
+    }
+
+    for name in tools:
+        namespace[name] = mcp_wrappers[name]
+
+    return namespace
+
+
+def make_mcp_wrapper(
+    tool_name: str,
+    invoke: Callable[[str, dict[str, Any]], Any],
+) -> Callable[..., Any]:
+    def wrapper(**kwargs: Any) -> Any:
+        return invoke(tool_name, kwargs)
+
+    wrapper.__name__ = tool_name
+    return wrapper
 
 
 # Init Typer app
@@ -249,6 +287,7 @@ class Sandbox:
         self.sndbx_cnfg: Optional[SandboxConfig] = None
         self.client: Optional[Client] = None
         self.tool_registry: dict[str, Tool] = {}
+        self.mcp_wrappers: dict[str, Callable]
         self._stack = AsyncExitStack()
 
     async def __aenter__(self) -> "Sandbox":
@@ -273,6 +312,10 @@ class Sandbox:
             active_client = await self._stack.enter_async_context(self.client)
             tools = await active_client.list_tools()
             self.tool_registry = build_tool_registry(tools)
+            self.mcp_wrappers = {
+                name: make_mcp_wrapper(name, self.invoke_mcp_tool)
+                for name in self.tool_registry
+            }
 
         return self
 
@@ -397,61 +440,72 @@ class Sandbox:
             sandbox_output=output
         )
 
+    async def read_command(self) -> str | None:
+        lines: list[str] = []
+
+        while True:
+            line = await asyncio.to_thread(sys.stdin.readline)
+
+            if not line or line.rstrip("\n") == COMMAND_END_MARKER:
+                return "".join(lines).strip()
+
+            lines.append(line)
+
     async def run(self) -> None:
         self.show_manual()
 
-        while (True):
-            data = ""
+        while True:
+            data = await self.read_command()
 
-            while (True):
-                d = await asyncio.to_thread(sys.stdin.readline)
-                if not d or d.strip() == "<<<END_COMMAND>>>":
-                    break
-                data += d
+            # while (True):
+            #     d = await asyncio.to_thread(sys.stdin.readline)
+            #     if not d or d.strip() == COMMAND_END_MARKER:
+            #         break
+            #     data += d
 
-            for line in data.splitlines():
-                line = line.strip()
+            # for line in data.splitlines():
+            #     line = line.strip()
 
-                if not line or line in ("exit", "exit()"):
-                    # TODO: some quit function
-                    print("Sandbox: Work complete,",
-                          "all connections terminated,",
-                          "all resources released. Bye!")
-                    return
-                if line in ("manual", "manual()"):
-                    self.show_manual()
-                    continue
-                if line in ("show_tools", "show_tools()"):
-                    result = SandboxIntermediateResult(
-                        success=True,
-                        tool_name="show_tools",
-                        sandbox_output=self.show_tools()
-                    )
-                    print(result.model_dump_json())
-                    sys.stdout.flush()
-                    continue
+            if not data or data in EXIT_COMMANDS:
+                # TODO: some quit function
+                print("Sandbox: Work complete,",
+                        "all connections terminated,",
+                        "all resources released. Bye!")
+                return
 
-                call: Optional[ParsedCall] = None
+            # if line in ("manual", "manual()"):
+            #     self.show_manual()
+            #     continue
+            # if line in ("show_tools", "show_tools()"):
+            #     result = SandboxIntermediateResult(
+            #         success=True,
+            #         tool_name="show_tools",
+            #         sandbox_output=self.show_tools()
+            #     )
+            #     print(result.model_dump_json())
+            #     sys.stdout.flush()
+            #     continue
 
-                try:
-                    if is_single_direct_call(line):
-                        call = parse_tool_call(line)
+            call: Optional[ParsedCall] = None
 
-                        result = await dispatch_tool_call(
-                            call,
-                            self.tool_registry,
-                            self.client
-                        )
-                    else:
-                        result = self.run_python(line)
-                except Exception as e:
-                    result = SandboxIntermediateResult(
-                        success=False,
-                        tool_name=call.name if call else "sandbox",
-                        sandbox_output=str(e)
-                    )
-                print(result.model_dump_json())
-                sys.stdout.flush()
+            try:
+                # if is_single_direct_call(data):
+                #     call = parse_tool_call(data)
+                #     result = await dispatch_tool_call(
+                #         call,
+                #         self.tool_registry,
+                #         self.client
+                #     )
+                # else:
+                #     result = self.run_python(data)
+            except Exception as e:
+                result = SandboxIntermediateResult(
+                    success=False,
+                    tool_name=call.name if call else "sandbox",
+                    sandbox_output=str(e)
+                )
+            print(result.model_dump_json())
+            sys.stdout.flush()
 
 
 async def sandbox_main(
