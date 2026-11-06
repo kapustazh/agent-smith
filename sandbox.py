@@ -278,6 +278,8 @@ class Sandbox:
         self.config: Optional[SandboxConfig] = None
         self.client: Optional[Client] = None
         self.tool_registry: dict[str, Tool] = {}
+        # self.resources: Any = []
+        # self.prompts: Any = []
         self.mcp_wrappers: dict[str, Callable]
         self._stack = AsyncExitStack()
 
@@ -303,6 +305,8 @@ class Sandbox:
             active_client = await self._stack.enter_async_context(self.client)
             tools = await active_client.list_tools()
             self.tool_registry = build_tool_registry(tools)
+            # self.resources = await active_client.list_resources()
+            # self.prompts = await active_client.list_prompts()
             self.mcp_wrappers = {
                 name: make_mcp_wrapper(name, self.invoke_mcp_tool)
                 for name in self.tool_registry
@@ -570,6 +574,22 @@ class Sandbox:
                 self.check_imports([node.module or ""])
             elif isinstance(node, (ast.Global, ast.Nonlocal)):
                 raise ValueError("Global declarations are not allowed")
+
+    async def invoke_mcp_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> Any:
+        call = ParsedCall(name=name, arguments=arguments)
+        tool = validate_tool_call(call, self.tool_registry)
+
+        if tool is None:
+            raise ValueError("final_answer is not an MCP tool")
+
+        if self.client is None:
+            raise RuntimeError("No active MCP client")
+
+        return await self.client.call_tool(name, arguments)
 
     def run_python(self, source: str) -> SandboxIntermediateResult:
         if not self.config:
