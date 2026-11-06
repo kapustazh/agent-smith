@@ -210,13 +210,19 @@ def get_python_type(prop: Any) -> str:
         "integer": "int",
         "number": "float",
         "boolean": "bool",
-        "object": "dict[str, Any]"
+        "object": "dict[str, Any]",
+        "null": "None"
     }
 
     if "anyOf" in prop:
         options = prop["anyOf"]
         non_null = [p for p in options if p.get("type") != "null"]
+        if not non_null:
+            return "None"
         return " | ".join(get_python_type(p) for p in non_null)
+
+    if "enum" in prop:
+        return "Literal[" + ", ".join(repr(value) for value in prop["enum"]) + "]"
 
     typ = prop.get("type")
 
@@ -231,15 +237,17 @@ def schema_to_signature(tool: Tool) -> str:
     schema = tool.input_schema or {}
     properties = schema.get("properties", {})
     required = set(schema.get("required", []))
+    params: list[str] = []
 
-    params = []
     for name, prop in properties.items():
-        typ = get_python_type(prop)
+        annotation = get_python_type(prop)
 
-        default = "" if name in required else " | None = None"
-        params.append(f"{name}: {typ}{default}")
+        if name in required:
+            params.append(f"{name}: {annotation}")
+        else:
+            params.append(f"{name}: {annotation} | None = None")
 
-    return f"- {tool.name}({', '.join(params)}): {tool.description})"
+    return f"- {tool.name}({', '.join(params)}): {tool.description or ''})"
 
 
 def manual(tools: list[Tool] | None) -> str:
@@ -259,9 +267,8 @@ def manual(tools: list[Tool] | None) -> str:
         # "- print(text: str): print a result"
     ]
 
-    if tools:
-        for tool in tools:
-            lines.append(schema_to_signature(tool))
+    for tool in tools or []:
+        lines.append(schema_to_signature(tool))
 
     return "\n".join(lines)
 
