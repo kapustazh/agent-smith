@@ -116,6 +116,10 @@ class StepMetrics(BaseModel):
         description=("Number of LLM API retries before getting a successful"
                      " response (0 = first attempt succeeded)"))
 
+    def __str__(self) -> str:
+        # Dynamically loops through all fields and puts them on a new line
+        return "\n".join(f"{k}: {v}" for k, v in self.model_dump().items())
+
 
 class SolutionOutput(BaseModel):
     """Output from student solution, required format for evaluation.
