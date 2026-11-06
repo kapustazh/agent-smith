@@ -30,7 +30,8 @@ EXIT_COMMANDS = {"exit", "exit()"}
 @dataclass(frozen=True)
 class ParsedCall:
     name: str
-    arguments: dict[str, Any]
+    positional_arguments: tuple[Any, ...]
+    keyword_arguments: dict[str, Any]
 
 
 class FinalAnswerSignal(Exception):
@@ -79,28 +80,36 @@ def parse_tool_call(source: str) -> ParsedCall:
     if not isinstance(expression.func, ast.Name):
         raise ValueError("Only direct function calls are allowed")
 
-    # if expression.args:
-    #     raise ValueError("Positional arguments are not allowed")
+    positional_args: list[Any] = []
 
-    arguments: dict[str, Any] = {}
+    for arg in expression.args:
+        try:
+            positional_args.append(ast.literal_eval(arg))
+        except (ValueError, TypeError, SyntaxError) as e:
+            raise ValueError(
+                "Positional arguments must be literal values"
+            ) from e
+
+    keyword_args: dict[str, Any] = {}
 
     for keyword in expression.keywords:
         if keyword.arg is None:
             raise ValueError("Unpacking keyword arguments is not allowed")
 
-        if keyword.arg in arguments:
+        if keyword.arg in keyword_args:
             raise ValueError(f"Duplicate argument: {keyword.arg}")
 
         try:
-            arguments[keyword.arg] = ast.literal_eval(keyword.value)
-        except (ValueError, TypeError, SyntaxError) as exc:
+            keyword_args[keyword.arg] = ast.literal_eval(keyword.value)
+        except (ValueError, TypeError, SyntaxError) as e:
             raise ValueError(
                 f"Argument '{keyword.arg}' must be a literal value"
-            ) from exc
+            ) from e
 
     return ParsedCall(
         name=expression.func.id,
-        arguments=arguments
+        positional_arguments=tuple(positional_args),
+        keyword_arguments=keyword_args
     )
 
 
@@ -109,13 +118,23 @@ def validate_tool_call(
     tool_registry: dict[str, Tool]
 ) -> Tool | None:
     if call.name == "final_answer":
-        if len(call.arguments) != 1:
+        positional_args = call.positional_arguments
+        keyword_args = call.keyword_arguments
+
+        if not (len(positional_args) == 1 and not keyword_args
+                or not positional_args and set(keyword_args) == {"answer"}):
             raise ValueError(
-                "final_answer requires exactly one argument"
+                "final_answer requires exactly one positional argument "
+                "or one 'answer' keyword argument"
             )
         # if not isinstance(call.arguments["answer"], str):
         #     raise ValueError("final_answer.answer must be a string")
         return None
+
+    if call.positional_arguments:
+        raise ValueError(
+            f"MCP tool '{call.name}' accepts keyword arguments only"
+        )
 
     tool = tool_registry.get(call.name)
     if tool is None:
@@ -126,7 +145,7 @@ def validate_tool_call(
     try:
         validator = Draft202012Validator(schema)
         validator.check_schema(schema)
-        validator.validate(call.arguments)
+        validator.validate(call.keyword_arguments)
     except SchemaError as exc:
         raise ValueError(
             f"Invalid schema for MCP tool '{call.name}'"
@@ -150,10 +169,15 @@ async def dispatch_tool_call(
     tool = validate_tool_call(call, tool_registry)
 
     if tool is None:
+        answer = (
+            call.positional_arguments[0]
+            if call.positional_arguments
+            else call.keyword_arguments["answer"]
+        )
         return SandboxIntermediateResult(
             success=True,
             tool_name="final_answer",
-            sandbox_output=call.arguments["answer"]
+            sandbox_output=answer
         )
 
     if not client:
@@ -162,7 +186,7 @@ async def dispatch_tool_call(
     try:
         result = await client.call_tool(
             call.name,
-            call.arguments
+            call.keyword_arguments
         )
     except (KeyboardInterrupt, SystemExit):
         raise
@@ -177,17 +201,6 @@ async def dispatch_tool_call(
         success=True,
         tool_name=call.name,
         sandbox_output=str(result)
-    )
-
-
-def is_single_direct_call(source: str) -> bool:
-    tree = ast.parse(source.strip(), mode="exec")
-
-    return (
-        len(tree.body) == 1
-        and isinstance(tree.body[0], ast.Expr)
-        and isinstance(tree.body[0].value, ast.Call)
-        and isinstance(tree.body[0].value.func, ast.Name)
     )
 
 
@@ -380,8 +393,8 @@ class Sandbox:
 
         if any(flag in mode for flag in ("w", "a", "x", "+")):
             if not any(path == Path(directory).resolve()
-                    or Path(directory).resolve() in path.parents
-                    for directory in self.config.allowed_directories):
+                       or Path(directory).resolve() in path.parents
+                       for directory in self.config.allowed_directories):
                 raise PermissionError(f"Write access denied: {path}")
 
         return builtins.open(path, mode, *args, **kwargs)
@@ -667,8 +680,8 @@ class Sandbox:
             if data is None or data in EXIT_COMMANDS:
                 # TODO: some quit function
                 print("Sandbox: Work complete,",
-                        "all connections terminated,",
-                        "all resources released. Bye!")
+                      "all connections terminated,",
+                      "all resources released. Bye!")
                 return
 
             if not data:
@@ -690,15 +703,7 @@ class Sandbox:
             call: Optional[ParsedCall] = None
 
             try:
-                if is_single_direct_call(data):
-                    call = parse_tool_call(data)
-                    result = await dispatch_tool_call(
-                        call,
-                        self.tool_registry,
-                        self.client
-                    )
-                else:
-                    result = self.run_python(data)
+                result = self.run_python(data)
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as e:
