@@ -41,7 +41,7 @@ class FinalAnswerSignal(Exception):
 
 
 def final_answer(answer: Any) -> None:
-    raise FinalAnswerSignal(str(answer))
+    raise FinalAnswerSignal(answer)
 
 
 def make_mcp_wrapper(
@@ -510,19 +510,12 @@ class Sandbox:
 
         return restricted
 
-    def build_execution_namespace(
-        self,
-        tools: dict[str, Tool],
-        mcp_wrappers: dict[str, Callable[..., Any]]
-    ) -> dict[str, Any]:
+    def build_execution_namespace(self) -> dict[str, Any]:
         namespace: dict[str, Any] = {
             "__builtins__": self.restricted_builtins(),
             "final_answer": final_answer
         }
-
-        for name in tools:
-            namespace[name] = mcp_wrappers[name]
-
+        namespace.update(self.mcp_wrappers)
         return namespace
 
     def execute_in_namespace(
@@ -537,7 +530,7 @@ class Sandbox:
             return SandboxIntermediateResult(
                 success=True,
                 tool_name="final_answer",
-                sandbox_output=str(signal.answer)
+                sandbox_output=signal.answer
             )
         except (KeyboardInterrupt, SystemExit):
             raise
@@ -600,7 +593,11 @@ class Sandbox:
         name: str,
         arguments: dict[str, Any],
     ) -> Any:
-        call = ParsedCall(name=name, arguments=arguments)
+        call = ParsedCall(
+            name=name,
+            positional_arguments=(),
+            keyword_arguments=arguments
+        )
         tool = validate_tool_call(call, self.tool_registry)
 
         if tool is None:
