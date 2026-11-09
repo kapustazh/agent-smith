@@ -53,7 +53,7 @@ class SandboxConfig(BaseModel):
         "heapq", "bisect", "copy",
         "string", "random",
         "datetime", "datetime.*",
-        "array", "cmath",])
+        "array", "cmath"])
     allowed_directories: list[str] = Field(
         default_factory=lambda: ["/testbed", "/tmp/agent"])
     max_execution_time_seconds: int = Field(default=30, gt=0, strict=True)
@@ -81,6 +81,7 @@ class SandboxIntermediateResult(BaseModel):
         "no_code",
         "recovered_code",
         "final_answer",
+        "memory_limit"
     ] | None = None
 
     partial: bool = False

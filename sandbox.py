@@ -379,7 +379,11 @@ class Sandbox:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=(os.name == "posix")
+            start_new_session=(os.name == "posix"),
+            env={
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C.UTF-8"
+            }
         )
 
         try:
@@ -401,8 +405,14 @@ class Sandbox:
                 timeout=5
             )
 
-            if not response or json.loads(response).get("type") != "ready":
-                raise RuntimeError("Worker did not initialize correctly")
+            if not response:
+                raise RuntimeError("Worker exited during initialization")
+            message = json.loads(response)
+            if message.get("type") != "ready":
+                raise RuntimeError(
+                    f"Worker initialization failed: \
+                    {message.get('error', message)}"
+                )
 
         except BaseException:
             await self._stop_worker()
@@ -614,7 +624,8 @@ class Sandbox:
                 .decode("utf-8", errors="ignore")[:remaining_chars]
             )
 
-            pieces.append(accepted)
+            if accepted:
+                pieces.append(accepted)
             byte_count += len(accepted.encode("utf-8"))
             char_count += len(accepted)
 
@@ -704,6 +715,9 @@ class Sandbox:
                         ),
                         truncated=truncated
                     )
+
+                if kind == "memory_limit":
+                    await self._stop_worker()
 
                 raise RuntimeError(f"Unexpected worker message: {kind}")
 
