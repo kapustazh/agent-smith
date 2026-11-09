@@ -298,9 +298,7 @@ class Sandbox:
         self.config: Optional[SandboxConfig] = None
         self.client: Optional[Client] = None
         self.tool_registry: dict[str, Tool] = {}
-        # self.resources: Any = []
-        # self.prompts: Any = []
-        self.mcp_wrappers: dict[str, Callable]
+        self.mcp_wrappers: dict[str, Callable[..., Any]] = {}
         self._stack = AsyncExitStack()
 
     async def __aenter__(self) -> "Sandbox":
@@ -325,8 +323,6 @@ class Sandbox:
             active_client = await self._stack.enter_async_context(self.client)
             tools = await active_client.list_tools()
             self.tool_registry = build_tool_registry(tools)
-            # self.resources = await active_client.list_resources()
-            # self.prompts = await active_client.list_prompts()
             self.mcp_wrappers = {
                 name: make_mcp_wrapper(name, self.invoke_mcp_tool)
                 for name in self.tool_registry
@@ -409,7 +405,7 @@ class Sandbox:
     def _read_process_output(
         self,
         process: subprocess.Popen[bytes]
-    ) -> tuple[bytes, bool, bool]:
+    ) -> tuple[bytes, bytes, bool, bool]:
         assert self.config is not None
 
         selector = selectors.DefaultSelector()
@@ -643,7 +639,7 @@ class Sandbox:
                 sandbox_output=f"Execution failed: {e}"
             )
 
-        output = stdout or stderr
+        output = stdout + (b"\n" if stdout and stderr else b"") + stderr
         text = output.decode("utf-8", errors="replace")
 
         if timed_out:
@@ -667,13 +663,31 @@ class Sandbox:
     async def read_command(self) -> str | None:
         lines: list[str] = []
 
-        while True:
-            line = await asyncio.to_thread(sys.stdin.readline)
+        import codeop
 
-            if not line or line.rstrip("\n") == COMMAND_END_MARKER:
-                return "".join(lines).strip()
+        while True:
+            prompt = "sandbox> " if not lines else "... "
+
+            try:
+                line = await asyncio.to_thread(input, prompt)
+            except EOFError:
+                return "\n".join(lines) if lines else None
+
+            if not lines and line.strip() in EXIT_COMMANDS:
+                return line.strip()
 
             lines.append(line)
+            source = "\n".join(lines)
+
+            try:
+                compiled = codeop.compile_command(
+                    source, "<sandbox>", "single"
+                )
+            except (SyntaxError, OverflowError, ValueError):
+                return source
+
+            if compiled is not None:
+                return source
 
     async def run(self) -> None:
         self.show_manual()
