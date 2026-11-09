@@ -3,12 +3,15 @@ import sys
 import asyncio
 import shlex
 import ast
-import resource
-import subprocess
+# import resource
+# import subprocess
 import builtins
 import os
-import selectors
-import time
+# import selectors
+# import time
+import codeop
+import signal
+import json
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 from contextlib import AsyncExitStack
@@ -34,14 +37,13 @@ class ParsedCall:
     keyword_arguments: dict[str, Any]
 
 
-class FinalAnswerSignal(Exception):
-    def __init__(self, answer: str) -> None:
-        self.answer = answer
-        super().__init__("final_answer called")
+# class FinalAnswerSignal(Exception):
+#     def __init__(self, answer: str) -> None:
+#         self.answer = answer
 
 
-def final_answer(answer: Any) -> None:
-    raise FinalAnswerSignal(answer)
+# def final_answer(answer: Any) -> None:
+#     raise FinalAnswerSignal(answer)
 
 
 def make_mcp_wrapper(
@@ -222,7 +224,9 @@ def get_python_type(prop: Any) -> str:
         return " | ".join(get_python_type(p) for p in non_null)
 
     if "enum" in prop:
-        return "Literal[" + ", ".join(repr(value) for value in prop["enum"]) + "]"
+        return (
+            "Literal[" + ", ".join(repr(value) for value in prop["enum"]) + "]"
+        )
 
     typ = prop.get("type")
 
@@ -300,6 +304,7 @@ class Sandbox:
         self.tool_registry: dict[str, Tool] = {}
         self.mcp_wrappers: dict[str, Callable[..., Any]] = {}
         self._stack = AsyncExitStack()
+        self._worker: Optional[asyncio.subprocess.Process] = None
 
     async def __aenter__(self) -> "Sandbox":
         await self._stack.__aenter__()
@@ -336,25 +341,10 @@ class Sandbox:
         exc_value: Optional[BaseException],
         traceback: Optional[TracebackType]
     ) -> None:
-        await self._stack.__aexit__(exc_type, exc_value, traceback)
-
-    def _limits(self) -> None:
-        assert self.config is not None
-
-        resource.setrlimit(
-            resource.RLIMIT_CPU,
-            (
-                self.config.max_execution_time_seconds,
-                self.config.max_execution_time_seconds
-            )
-        )
-        resource.setrlimit(
-            resource.RLIMIT_AS,
-            (
-                self.config.max_memory_mb * 1024 * 1024,
-                self.config.max_memory_mb * 1024 * 1024
-            )
-        )
+        try:
+            await self._stop_worker()
+        finally:
+            await self._stack.__aexit__(exc_type, exc_value, traceback)
 
     def _execution_directory(self) -> str:
         if self.config is None:
@@ -367,6 +357,79 @@ class Sandbox:
                 return str(path)
 
         raise RuntimeError("No allowed execution directory exists")
+
+    async def _start_worker(self) -> None:
+        """Start the worker if it is not already running."""
+        if self._worker is not None and self._worker.returncode is None:
+            return
+
+        if self.config is None:
+            raise RuntimeError("Sandbox configuration is not loaded")
+
+        worker_path = (
+            Path(__file__).resolve().parent / "src" / "sandbox_worker.py"
+        )
+
+        self._worker = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-I",
+            "-u",
+            str(worker_path),
+            cwd=self._execution_directory(),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=(os.name == "posix")
+        )
+
+        try:
+            assert self._worker.stdin is not None
+            assert self._worker.stdout is not None
+
+            request = {
+                "type": "init",
+                "config": self.config.model_dump()
+            }
+
+            self._worker.stdin.write(
+                (json.dumps(request) + "\n").encode()
+            )
+            await self._worker.stdin.drain()
+
+            response = await asyncio.wait_for(
+                self._worker.stdout.readline(),
+                timeout=5
+            )
+
+            if not response or json.loads(response).get("type") != "ready":
+                raise RuntimeError("Worker did not initialize correctly")
+
+        except BaseException:
+            await self._stop_worker()
+            raise
+
+    async def _stop_worker(self) -> None:
+        """Terminate the worker and any processes in its process group."""
+
+        if self._worker is None:
+            return
+
+        process = self._worker
+        self._worker = None
+
+        if process.returncode is None:
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                process.kill()
+
+        await process.wait()
+
+        if process.stdin is not None:
+            process.stdin.close()
 
     def _allowed_path(self, path: str | os.PathLike[str]) -> Path:
         if self.config is None:
@@ -401,69 +464,6 @@ class Sandbox:
                 raise PermissionError(f"Write access denied: {path}")
 
         return builtins.open(path, mode, *args, **kwargs)
-
-    def _read_process_output(
-        self,
-        process: subprocess.Popen[bytes]
-    ) -> tuple[bytes, bytes, bool, bool]:
-        assert self.config is not None
-
-        selector = selectors.DefaultSelector()
-        streams = {
-            process.stdout: bytearray(),
-            process.stderr: bytearray()
-        }
-
-        for stream in streams:
-            assert stream is not None
-            os.set_blocking(stream.fileno(), False)
-            selector.register(stream, selectors.EVENT_READ)
-
-        deadline = time.monotonic() + self.config.max_execution_time_seconds
-        output_limit = self.config.max_output_bytes
-        total_bytes = 0
-        truncated = False
-        timed_out = False
-
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-
-            if remaining <= 0:
-                timed_out = True
-                process.kill()
-                break
-
-            for key, _ in selector.select(remaining):
-                stream = key.fileobj
-                chunk = stream.read(4096)
-
-                if not chunk:
-                    selector.unregister(stream)
-                    continue
-
-                available = output_limit - total_bytes
-
-                if available > 0:
-                    streams[stream].extend(chunk[:available])
-                    total_bytes += min(len(chunk), available)
-
-                if len(chunk) > available:
-                    truncated = True
-
-        if timed_out:
-            process.kill()
-
-        process.wait()
-
-        for stream in list(selector.get_map().values()):
-            selector.unregister(stream.fileobj)
-
-        return (
-            bytes(streams[process.stdout]),
-            bytes(streams[process.stderr]),
-            timed_out,
-            truncated
-        )
 
     def restricted_builtins(self) -> dict[str, Any]:
         allowed_names = {
@@ -505,43 +505,6 @@ class Sandbox:
         restricted["open"] = self._safe_open
 
         return restricted
-
-    def build_execution_namespace(self) -> dict[str, Any]:
-        namespace: dict[str, Any] = {
-            "__builtins__": self.restricted_builtins(),
-            "final_answer": final_answer
-        }
-        namespace.update(self.mcp_wrappers)
-        return namespace
-
-    def execute_in_namespace(
-        self,
-        source: str
-    ) -> SandboxIntermediateResult:
-        namespace = self.build_execution_namespace()
-
-        try:
-            exec(compile(source, "<sandbox>", "exec"), namespace, namespace)
-        except FinalAnswerSignal as signal:
-            return SandboxIntermediateResult(
-                success=True,
-                tool_name="final_answer",
-                sandbox_output=signal.answer
-            )
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except Exception as exc:
-            return SandboxIntermediateResult(
-                success=False,
-                tool_name="python",
-                sandbox_output=str(exc)
-            )
-
-        return SandboxIntermediateResult(
-            success=True,
-            tool_name="python",
-            sandbox_output=""
-        )
 
     def show_manual(self) -> None:
         print(manual(list(self.tool_registry.values())))
@@ -587,7 +550,7 @@ class Sandbox:
     async def invoke_mcp_tool(
         self,
         name: str,
-        arguments: dict[str, Any],
+        arguments: dict[str, Any]
     ) -> Any:
         call = ParsedCall(
             name=name,
@@ -604,66 +567,184 @@ class Sandbox:
 
         return await self.client.call_tool(name, arguments)
 
-    def run_python(self, source: str) -> SandboxIntermediateResult:
-        if not self.config:
+    async def run_python(self, source: str) -> SandboxIntermediateResult:
+        if self.config is None:
             raise RuntimeError("Sandbox configuration is not loaded")
 
         try:
             self.validate_python_source(source)
-        except (SyntaxError, ValueError, RuntimeError) as e:
+        except SyntaxError as e:
             return SandboxIntermediateResult(
                 success=False,
                 tool_name="python",
-                sandbox_output=str(e)
+                sandbox_output=f"Syntax error: {e}",
+                status="syntax_error"
             )
+        except (ValueError, RuntimeError) as e:
+            return SandboxIntermediateResult(
+                success=False,
+                tool_name="python",
+                sandbox_output=str(e),
+                status="error"
+            )
+
+        await self._start_worker()
+        process = self._worker
+        assert process is not None
+        assert process.stdin is not None
+        assert process.stdout is not None
+
+        pieces: list[str] = []
+        byte_count = 0
+        char_count = 0
+        truncated = False
+
+        def append_output(value: str) -> None:
+            nonlocal byte_count, char_count, truncated
+
+            remaining_bytes = max(
+                0, self.config.max_output_bytes - byte_count
+            )
+            remaining_chars = max(
+                0, self.config.max_output_chars - char_count
+            )
+
+            accepted = (
+                value.encode("utf-8")[:remaining_bytes]
+                .decode("utf-8", errors="ignore")[:remaining_chars]
+            )
+
+            pieces.append(accepted)
+            byte_count += len(accepted.encode("utf-8"))
+            char_count += len(accepted)
+
+            if accepted != value:
+                truncated = True
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.config.max_execution_time_seconds
 
         try:
-            process = subprocess.Popen(
-                [sys.executable, "-I", "-c", source],
-                cwd=self._execution_directory(),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                preexec_fn=self._limits
+            request = {"type": "run", "code": source}
+            process.stdin.write(
+                (json.dumps(request) + "\n").encode()
+            )
+            await asyncio.wait_for(
+                process.stdin.drain(),
+                timeout=max(0.001, deadline - loop.time()),
             )
 
-            stdout, stderr, timed_out, truncated = self._read_process_output(
-                process
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+
+                raw = await asyncio.wait_for(
+                    process.stdout.readline(),
+                    timeout=remaining
+                )
+
+                if not raw:
+                    await self._stop_worker()
+                    return SandboxIntermediateResult(
+                        success=False,
+                        tool_name="python",
+                        status="error",
+                        sandbox_output=(
+                            "".join(pieces) +
+                            "\nWorker exited unexpectedly."
+                        ),
+                        partial=True,
+                        truncated=truncated
+                    )
+
+                message = json.loads(raw)
+                kind = message.get("type")
+
+                if kind == "output":
+                    append_output(message.get("text", ""))
+                    continue
+
+                if kind == "control":
+                    await self._stop_worker()
+                    if message.get("name") == "KeyboardInterrupt":
+                        raise KeyboardInterrupt()
+                    raise SystemExit(message.get("code"))
+
+                if kind == "result":
+                    status = message["status"]
+
+                    if status == "final_answer":
+                        answer = message["answer"]
+                        return SandboxIntermediateResult(
+                            success=True,
+                            tool_name="final_answer",
+                            sandbox_output=answer,
+                            status="final_answer",
+                            final_answer=answer,
+                            truncated=truncated
+                        )
+
+                    append_output(message.get("error", ""))
+                    output = "".join(pieces)
+
+                    if truncated:
+                        output += (
+                            "\n[Sandbox: Output truncated due to size limits.]"
+                        )
+
+                    return SandboxIntermediateResult(
+                        success=(status == "success"),
+                        tool_name="python",
+                        sandbox_output=output,
+                        status=(
+                            "truncated"
+                            if truncated and status == "success"
+                            else status
+                        ),
+                        truncated=truncated
+                    )
+
+                raise RuntimeError(f"Unexpected worker message: {kind}")
+
+        except asyncio.TimeoutError:
+            await self._stop_worker()
+
+            return SandboxIntermediateResult(
+                success=False,
+                tool_name="python",
+                status="timeout",
+                partial=True,
+                truncated=truncated,
+                sandbox_output=(
+                    f"Execution timed out after "
+                    f"{self.config.max_execution_time_seconds} seconds.\n"
+                    f"Partial output:\n{''.join(pieces)}\n"
+                    "Worker terminated. Namespace state was lost."
+                    + (
+                        "\n[Sandbox: Output truncated due to size limits.]"
+                        if truncated else ""
+                    )
+                )
             )
-        except (KeyboardInterrupt, SystemExit):
+
+        except asyncio.CancelledError:
+            await self._stop_worker()
             raise
-        except OSError as e:
+
+        except (BrokenPipeError, ConnectionResetError,
+                json.JSONDecodeError, RuntimeError) as exc:
+            await self._stop_worker()
+
             return SandboxIntermediateResult(
                 success=False,
                 tool_name="python",
-                sandbox_output=f"Execution failed: {e}"
+                status="error",
+                sandbox_output=f"Worker communication failed: {exc}",
             )
-
-        output = stdout + (b"\n" if stdout and stderr else b"") + stderr
-        text = output.decode("utf-8", errors="replace")
-
-        if timed_out:
-            text = f"Execution timed out. Partial output:\n{text}"
-
-        if truncated:
-            text += "\nOutput truncated due to configured size limits."
-
-        if process.returncode != 0 and not timed_out:
-            return SandboxIntermediateResult(
-                success=False,
-                tool_name="python",
-                sandbox_output=text
-            )
-        return SandboxIntermediateResult(
-            success=not timed_out,
-            tool_name="python",
-            sandbox_output=text
-        )
 
     async def read_command(self) -> str | None:
         lines: list[str] = []
-
-        import codeop
 
         while True:
             prompt = "sandbox> " if not lines else "... "
@@ -681,7 +762,7 @@ class Sandbox:
 
             try:
                 compiled = codeop.compile_command(
-                    source, "<sandbox>", "single"
+                    source, "<sandbox>", "exec"
                 )
             except (SyntaxError, OverflowError, ValueError):
                 return source
@@ -721,7 +802,7 @@ class Sandbox:
             call: Optional[ParsedCall] = None
 
             try:
-                result = self.run_python(data)
+                result = await self.run_python(data)
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as e:

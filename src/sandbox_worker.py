@@ -33,7 +33,7 @@ class OutputStream:
             send({
                 "type": "output",
                 "stream": self.stream,
-                "text": value[pos:pos + 1024],
+                "text": value[pos:pos + 1024]
             })
         return len(value)
 
@@ -46,19 +46,19 @@ def execute(source: str, namespace: dict) -> None:
     try:
         with (
             contextlib.redirect_stdout(OutputStream("stdout")),
-            contextlib.redirect_stderr(OutputStream("stderr")),
+            contextlib.redirect_stderr(OutputStream("stderr"))
         ):
             exec(
                 compile(source, "<sandbox>", "exec"),
                 namespace,
-                namespace,
+                namespace
             )
 
     except FinalAnswerSignal as signal:
         send({
             "type": "result",
             "status": "final_answer",
-            "answer": signal.answer,
+            "answer": signal.answer
         })
 
     except (KeyboardInterrupt, SystemExit) as exc:
@@ -69,21 +69,21 @@ def execute(source: str, namespace: dict) -> None:
         send({
             "type": "control",
             "name": type(exc).__name__,
-            "code": code,
+            "code": code
         })
 
     except SyntaxError:
         send({
             "type": "result",
             "status": "syntax_error",
-            "error": traceback.format_exc(),
+            "error": traceback.format_exc()
         })
 
     except Exception:
         send({
             "type": "result",
             "status": "error",
-            "error": traceback.format_exc(),
+            "error": traceback.format_exc()
         })
 
     else:
@@ -93,7 +93,7 @@ def execute(source: str, namespace: dict) -> None:
 def main() -> None:
     namespace = {
         "__name__": "__sandbox__",
-        "final_answer": final_answer,
+        "final_answer": final_answer
     }
 
     for line in sys.stdin:
@@ -111,7 +111,7 @@ def main() -> None:
                 send({
                     "type": "result",
                     "status": "error",
-                    "error": f"Unknown message: {kind}",
+                    "error": f"Unknown message: {kind}"
                 })
         except (KeyboardInterrupt, SystemExit):
             raise
@@ -119,7 +119,7 @@ def main() -> None:
             send({
                 "type": "result",
                 "status": "error",
-                "error": traceback.format_exc(),
+                "error": traceback.format_exc()
             })
 
 
