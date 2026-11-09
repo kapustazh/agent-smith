@@ -254,6 +254,7 @@ def main(
         llm_response_raw_text = ""
         sandbox_input = ""
         sandbox_output = ""
+        llm_retries = 0
 
         # print("="*10, f" Prompt (step {llm_step}):")
         typer.secho(f"==========  Prompt (step {llm_step_number}):",
@@ -263,10 +264,13 @@ def main(
 
         llm_start_time = time.perf_counter()
 
+        # extra_body: dict[str, any] = {}
+        # if model_name not in ["stealth/crouton-alpha"]:
+        #     extra_body = {"reasoning": {"effort": "none"}}
+
         try:
             response_raw = llm.chat_raw(
                 messages,
-                temperature=0,
                 extra_body={"reasoning": {"effort": "none"}},
             )
             llm_response_raw_text = ""
@@ -291,7 +295,7 @@ def main(
             return
 
         llm_finish_time = time.perf_counter()
-
+        llm_retries = llm.retries
         usage = response.usage
         if usage is not None:
             llm_input_tokens = usage.prompt_tokens
@@ -328,68 +332,73 @@ def main(
         print("+"*10)
 
         # If llm request tools via standard interface
-        for tool_call in response.choices[0].message.tool_calls:
-            print("-- Tool:", tool_call)
+        if response.choices[0].message.tool_calls:
+            for tool_call in response.choices[0].message.tool_calls:
+                print("-- Tool:", tool_call)
 
-            if tool_call.type == 'function':
-                call_id = str(tool_call.id)
-                tool_name = str(tool_call.function.name).strip()
-                llm_response_raw_text += (
-                    "\n<tool_call>\n"
-                    f"  ID: {call_id}\n"
-                    f"  Name: {tool_name}\n")
-                if tool_call.function.arguments:
+                if tool_call.type == 'function':
+                    call_id = str(tool_call.id)
+                    tool_name = str(tool_call.function.name).strip()
                     llm_response_raw_text += (
-                        "  Arguments: "
-                        f"{tool_call.function.arguments}\n")
-                llm_response_raw_text += "</tool_call>\n"
-                if tool_name not in sandbox_tools_list:
-                    print(f"Tool (name={tool_name}) not found!")
+                        "\n<tool_call>\n"
+                        f"  ID: {call_id}\n"
+                        f"  Name: {tool_name}\n")
+                    if tool_call.function.arguments:
+                        llm_response_raw_text += (
+                            "  Arguments: "
+                            f"{tool_call.function.arguments}\n")
+                    llm_response_raw_text += "</tool_call>\n"
+                    if tool_name not in sandbox_tools_list:
+                        print(f"Tool (name={tool_name}) not found!")
+                        messages.append(
+                            cast(ChatCompletionMessageParam,
+                                 {
+                                    "role": "tool",
+                                    "tool_call_id": call_id,
+                                    "content": ("Error: Tool (name="
+                                                f"{tool_name}) not found!")
+                                 }))
+                        llm_finish = False
+                        continue
+                    arg_str = ""
+                    if tool_call.function.arguments:
+                        arg_str = mpc_arguments_to_python(
+                            tool_call.function.arguments)
+                    sb_call = f"{tool_name}({arg_str})"
+                    print(" - call_id:", call_id)
+                    print(" - call:", sb_call)
+                    sandbox_input += sb_call + "\n"
+                    result_ = sandbox.run_tool(sb_call)
+                    tool_result = result_.sandbox_output
+                    sandbox_output += str(tool_result) + "\n"
+                    print(" - result:", tool_result)
                     messages.append(
                         cast(ChatCompletionMessageParam,
                              {
                                 "role": "tool",
                                 "tool_call_id": call_id,
-                                "content": ("Error: Tool (name="
-                                            f"{tool_name}) not found!")
+                                "content": tool_result
                              }))
-                    llm_finish = False
-                    continue
-                arg_str = ""
-                if tool_call.function.arguments:
-                    arg_str = mpc_arguments_to_python(
-                        tool_call.function.arguments)
-                sb_call = f"{tool_name}({arg_str})"
-                print(" - call_id:", call_id)
-                print(" - call:", sb_call)
-                sandbox_input += sb_call + "\n"
-                result_ = sandbox.run_tool(sb_call)
-                tool_result = result_.sandbox_output
-                sandbox_output += str(tool_result) + "\n"
-                print(" - result:", tool_result)
-                messages.append(
-                    cast(ChatCompletionMessageParam,
-                         {
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": tool_result
-                         }))
-                # print("*********** message:", messages)
-                if tool_name == 'run_tests' and result_.success:
-                    print("$$$$$:", tool_result)
-                    llm_tested_code = True
-                    llm_finish = False
-                elif tool_name == 'final_answer' and result_.success:
-                    solution = str(tool_result)
-                    # the end of task
-                    if not llm_tested_code:
-                        pass  # test in sandbox if LLM not tested it
-                    llm_finish = True
+                    # print("*********** message:", messages)
+                    if tool_name == 'run_tests' and result_.success:
+                        print("$$$$$:", tool_result)
+                        llm_tested_code = True
+                        llm_finish = False
+                    elif tool_name == 'final_answer' and result_.success:
+                        solution = str(tool_result)
+                        # the end of task
+                        if not llm_tested_code:
+                            pass  # test in sandbox if LLM not tested it
+                        llm_finish = True
+                    else:
+                        llm_finish = False
                 else:
-                    llm_finish = False
-            else:
-                print("LLM try to call not supported type of call tool "
-                      f"(type={tool_call.type}).")
+                    print("LLM try to call not supported type of call tool "
+                          f"(type={tool_call.type}).")
+        else:
+            #  chek if model ask tool in python style
+            # for example for model_name: nvidia/nemotron-3.5-super-vl:free
+            pass
 
         # Calculate duration in milliseconds accurately
         llm_duration = int((llm_finish_time - llm_start_time) * 1000)
@@ -403,6 +412,7 @@ def main(
             llm_output=llm_response_raw_text,
             sandbox_input=sandbox_input.strip(),
             sandbox_output=sandbox_output.strip(),
+            retries=llm_retries
             )
         steps.append(current_step)
         print("==== ", current_step)
