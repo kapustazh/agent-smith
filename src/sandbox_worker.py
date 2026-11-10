@@ -17,6 +17,7 @@ if _spec is None or _spec.loader is None:
     raise RuntimeError(f"Cannot load security module: {_security_file}")
 _security = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_security)
+_rpc_counter = 0
 enforce_security = _security.enforce_security
 restricted_builtins = _security.restricted_builtins
 
@@ -36,6 +37,97 @@ def send(message: dict) -> None:
     """Send a JSON message to the parent process."""
     sys.__stdout__.write(json.dumps(message, ensure_ascii=False) + "\n")
     sys.__stdout__.flush()
+
+
+def mcp_rpc(operation: str, **arguments):
+    """Synchronously request an MCP operation from the parent."""
+    global _rpc_counter
+    _rpc_counter += 1
+    request_id = _rpc_counter
+
+    send({
+        "type": "mcp_request",
+        "id": request_id,
+        "operation": operation,
+        **arguments
+    })
+
+    # Parent sends one response over the existing stdin pipe.
+    raw = sys.stdin.readline()
+
+    if not raw:
+        raise RuntimeError("MCP parent disconnected")
+
+    response = json.loads(raw)
+
+    if (
+        response.get("type") != "mcp_response"
+        or response.get("id") != request_id
+    ):
+        raise RuntimeError(
+            "MCP communication error: unexpected response"
+        )
+
+    if not response.get("ok"):
+        raise RuntimeError(
+            f"MCP request failed: {response.get('error')}"
+        )
+
+    return response.get("value")
+
+
+def create_mcp_namespace(
+    aliases: dict[str, str]
+) -> dict:
+    """Build Python-callable MCP wrappers inside the worker."""
+
+    def mcp_call_tool(name: str, **kwargs):
+        return mcp_rpc(
+            "call_tool", name=name, arguments=kwargs
+        )
+
+    def mcp_read_resource(uri: str):
+        return mcp_rpc("read_resource", uri=uri)
+
+    def mcp_get_prompt(
+        name: str,
+        arguments: dict[str, str] | None = None
+    ):
+        return mcp_rpc(
+            "get_prompt",
+            name=name,
+            arguments=arguments or {}
+        )
+
+    def mcp_list_resources():
+        return mcp_rpc("list_resources")
+
+    def mcp_list_resource_templates():
+        return mcp_rpc("list_resource_templates")
+
+    def mcp_list_prompts():
+        return mcp_rpc("list_prompts")
+
+    namespace = {
+        "mcp_call_tool": mcp_call_tool,
+        "mcp_read_resource": mcp_read_resource,
+        "mcp_get_prompt": mcp_get_prompt,
+        "mcp_list_resources": mcp_list_resources,
+        "mcp_list_resource_templates": mcp_list_resource_templates,
+        "mcp_list_prompts": mcp_list_prompts
+    }
+
+    def create_tool_wrapper(original_name: str):
+        def wrapper(**kwargs):
+            return mcp_call_tool(original_name, **kwargs)
+        return wrapper
+
+    for python_name, original_name in aliases.items():
+        namespace[python_name] = create_tool_wrapper(
+            original_name
+        )
+
+    return namespace
 
 
 class OutputStream:
@@ -110,6 +202,9 @@ def main() -> None:
                     "__builtins__": safe,
                     "final_answer": final_answer
                 }
+                namespace.update(
+                    create_mcp_namespace(message.get("tools", {}))
+                )
                 initialized = True
                 send({"type": "ready"})
 

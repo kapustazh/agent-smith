@@ -12,6 +12,7 @@ import os
 import codeop
 import signal
 import json
+import keyword
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 from contextlib import AsyncExitStack
@@ -94,18 +95,18 @@ def parse_tool_call(source: str) -> ParsedCall:
 
     keyword_args: dict[str, Any] = {}
 
-    for keyword in expression.keywords:
-        if keyword.arg is None:
+    for key_word in expression.keywords:
+        if key_word.arg is None:
             raise ValueError("Unpacking keyword arguments is not allowed")
 
-        if keyword.arg in keyword_args:
-            raise ValueError(f"Duplicate argument: {keyword.arg}")
+        if key_word.arg in keyword_args:
+            raise ValueError(f"Duplicate argument: {key_word.arg}")
 
         try:
-            keyword_args[keyword.arg] = ast.literal_eval(keyword.value)
+            keyword_args[key_word.arg] = ast.literal_eval(key_word.value)
         except (ValueError, TypeError, SyntaxError) as e:
             raise ValueError(
-                f"Argument '{keyword.arg}' must be a literal value"
+                f"Argument '{key_word.arg}' must be a literal value"
             ) from e
 
     return ParsedCall(
@@ -237,7 +238,7 @@ def get_python_type(prop: Any) -> str:
     return types.get(typ, "Any")
 
 
-def schema_to_signature(tool: Tool) -> str:
+def schema_to_signature(tool: Tool, python_name: str | None = None) -> str:
     schema = tool.input_schema or {}
     properties = schema.get("properties", {})
     required = set(schema.get("required", []))
@@ -249,30 +250,120 @@ def schema_to_signature(tool: Tool) -> str:
         if name in required:
             params.append(f"{name}: {annotation}")
         else:
-            params.append(f"{name}: {annotation} | None = None")
+            # params.append(f"{name}: {annotation} | None = None")
+            params.append(f"{name}: {annotation} (optional)")
 
-    return f"- {tool.name}({', '.join(params)}): {tool.description or ''})"
+    name = python_name or tool.name
+    result = f"- {name}({', '.join(params)})"
+
+    if name != tool.name:
+        result += f" [MCP name: {tool.name}]"
+
+    if tool.description:
+        # result += f": {tool.description}"
+        result += f"\n  Description: {tool.description}"
+
+    # # Include the actual JSON Schema for exact constraints.
+    # result += (
+    #     "\n  Input schema: "
+    #     + json.dumps(schema, ensure_ascii=False)
+    # )
+
+    return result
+
+    # return f"- {tool.name}({', '.join(params)}): {tool.description or ''})"
 
 
-def manual(tools: list[Tool] | None) -> str:
+def manual(
+    tools: list[Tool] | None,
+    aliases: dict[str, str] | None = None,
+    resources: list[Any] | None = None,
+    prompts: list[Any] | None = None,
+    resource_templates: list[Any] | None = None,
+    discovery_errors: dict[str, str] | None = None
+) -> str:
     """Generate the dynamic manual the LLM receives in the system prompt."""
 
     lines = [
-        "Sandbox execution manual:",
-        "- Write exactly one Python code block per step.",
-        "- Tool calls are ordinary Python function calls.",
-        "- Use final_answer(answer_string) when the task is solved.",
-        "- Positional arguments are rejected for MCP tools;" +
-        "use keyword arguments.\n",
-        "Available tools:",
-        "- final_answer(answer: str): terminate the agent loop and " +
-        "return the solution."
-        # "- show_tools(): show available tool names",
-        # "- print(text: str): print a result"
+        #  # Propose start
+        "Sandbox execution manual",
+        "",
+        "Write Python code in one code block per agent step.",
+        "MCP tools are available as Python functions.",
+        "Use keyword arguments for MCP tool calls.",
+        "MCP results can be strings, dictionaries, or lists.",
+        "Use final_answer(answer_string) to finish.",
+        "",
+        "Built-in function:",
+        "- final_answer(answer: str)",
+        "",
+        "MCP helper functions:",
+        "- mcp_call_tool(name: str, **kwargs)",
+        "- mcp_list_resources()",
+        "- mcp_list_resource_templates()",
+        "- mcp_read_resource(uri: str)",
+        "- mcp_list_prompts()",
+        "- mcp_get_prompt(name: str, arguments: dict | None = None)",
+        "",
+        "Available MCP tools:"
+        #  # Propose end
+        # "Sandbox execution manual:",
+        # "- Write exactly one Python code block per step.",
+        # "- Tool calls are ordinary Python function calls.",
+        # "- Use final_answer(answer_string) when the task is solved.",
+        # "- Positional arguments are rejected for MCP tools;" +
+        # "use keyword arguments.\n",
+        # "Available tools:",
+        # "- final_answer(answer: str): terminate the agent loop and " +
+        # "return the solution."
+        # # "- show_tools(): show available tool names",
+        # # "- print(text: str): print a result"
     ]
 
-    for tool in tools or []:
-        lines.append(schema_to_signature(tool))
+    registry = {tool.name: tool for tool in (tools or [])}
+
+    if aliases:
+        for python_name, original_name in aliases.items():
+            lines.append(
+                schema_to_signature(
+                    registry[original_name], python_name
+                )
+            )
+    else:
+        lines.append("(No MCP tools available)")
+
+    lines.append("\nAvailable MCP resources:")
+
+    for resource in resources or []:
+        lines.append(
+            f"- {resource.uri}: "
+            f"{resource.description or ''}"
+        )
+
+    lines.append("\nAvailable resource templates:")
+
+    for template in resource_templates or []:
+        lines.append(
+            f"- {template.uri_template}: "
+            f"{template.description or ''}"
+        )
+
+    lines.append("\nAvailable MCP prompts:")
+
+    for prompt in prompts or []:
+        args = [
+            f"{arg.name}{' (required)' if arg.required else ''}"
+            for arg in (prompt.arguments or [])
+        ]
+        lines.append(
+            f"- {prompt.name}({', '.join(args)}): "
+            f"{prompt.description or ''}"
+        )
+
+    if discovery_errors:
+        lines.append("\nMCP discovery warnings:")
+        for capability, error in discovery_errors.items():
+            lines.append(f"- {capability}: {error}")
 
     return "\n".join(lines)
 
@@ -286,6 +377,44 @@ def build_tool_registry(tools: list[Tool]) -> dict[str, Tool]:
         registry[tool.name] = tool
 
     return registry
+
+
+def build_mcp_aliases(
+    registry: dict[str, Tool],
+) -> dict[str, str]:
+    """Map valid Python function names to original MCP tool names."""
+
+    reserved = set(dir(builtins)) | {
+        "final_answer",
+        "mcp_call_tool",
+        "mcp_read_resource",
+        "mcp_get_prompt",
+        "mcp_list_resources",
+        "mcp_list_resource_templates",
+        "mcp_list_prompts"
+    }
+
+    aliases: dict[str, str] = {}
+
+    for number, name in enumerate(sorted(registry), start=1):
+        if (
+            name.isidentifier()
+            and not keyword.iskeyword(name)
+            and not name.startswith("_")
+            and name not in reserved
+        ):
+            alias = name
+        else:
+            alias = f"mcp_tool_{number}"
+
+            while alias in reserved or alias in registry or alias in aliases:
+                number += 1
+                alias = f"mcp_tool_{number}"
+
+        aliases[alias] = name
+        reserved.add(alias)
+
+    return aliases
 
 
 class Sandbox:
@@ -302,7 +431,12 @@ class Sandbox:
         self.config: Optional[SandboxConfig] = None
         self.client: Optional[Client] = None
         self.tool_registry: dict[str, Tool] = {}
-        self.mcp_wrappers: dict[str, Callable[..., Any]] = {}
+        self.tool_aliases: dict[str, str] = {}
+        self.resources: list[Any] = []
+        self.resource_templates: list[Any] = []
+        self.prompts: list[Any] = []
+        self.discovery_errors: dict[str, str] = {}
+        # self.mcp_wrappers: dict[str, Callable[..., Any]] = {}
         self._stack = AsyncExitStack()
         self._worker: Optional[asyncio.subprocess.Process] = None
 
@@ -325,13 +459,32 @@ class Sandbox:
             self.client = Client(self.mcp_server)
 
         if self.client is not None:
-            active_client = await self._stack.enter_async_context(self.client)
+            active_client = await self._stack.enter_async_context(
+                self.client
+            )
+
+            # Discover tools dynamically.
             tools = await active_client.list_tools()
             self.tool_registry = build_tool_registry(tools)
-            self.mcp_wrappers = {
-                name: make_mcp_wrapper(name, self.invoke_mcp_tool)
-                for name in self.tool_registry
+            self.tool_aliases = build_mcp_aliases(self.tool_registry)
+
+            # Discover optional MCP capabilities.
+            capabilities = {
+                "resources": "list_resources",
+                "resource_templates": "list_resource_templates",
+                "prompts": "list_prompts"
             }
+
+            for attribute, method_name in capabilities.items():
+                try:
+                    method = getattr(active_client, method_name)
+                    items = await method()
+                    setattr(self, attribute, items)
+                except Exception as exc:
+                    self.discovery_errors[attribute] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    setattr(self, attribute, [])
 
         return self
 
@@ -392,7 +545,8 @@ class Sandbox:
 
             request = {
                 "type": "init",
-                "config": self.config.model_dump()
+                "config": self.config.model_dump(),
+                "tools": self.tool_aliases
             }
 
             self._worker.stdin.write(
@@ -517,13 +671,29 @@ class Sandbox:
         return restricted
 
     def show_manual(self) -> None:
-        print(manual(list(self.tool_registry.values())))
+        print(
+            manual(
+                tools=list(self.tool_registry.values()),
+                aliases=self.tool_aliases,
+                resources=self.resources,
+                prompts=self.prompts,
+                resource_templates=self.resource_templates,
+                discovery_errors=self.discovery_errors
+            )
+        )
         sys.stdout.flush()
 
     def show_tools(self) -> list[str]:
-        tools = ["final_answer", "show_tools"]
-        tools.extend([t for t in self.tool_registry])
-        return tools
+        return [
+            "final_answer",
+            "mcp_call_tool",
+            "mcp_read_resource",
+            "mcp_get_prompt",
+            "mcp_list_resources",
+            "mcp_list_resource_templates",
+            "mcp_list_prompts",
+            *self.tool_aliases.keys()
+        ]
 
     def check_imports(self, names: list[str]) -> None:
         if not self.config:
@@ -577,6 +747,154 @@ class Sandbox:
 
         return await self.client.call_tool(name, arguments)
 
+    async def _handle_mcp_request(
+        self,
+        request: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Run MCP operations in the trusted parent process."""
+
+        request_id = request.get("id")
+
+        try:
+            if self.client is None or self.config is None:
+                raise RuntimeError("No active MCP connection")
+
+            operation = request.get("operation")
+
+            def as_dict(obj: Any) -> Any:
+                if hasattr(obj, "model_dump"):
+                    return obj.model_dump(
+                        mode="json", exclude_none=True
+                    )
+                return obj
+
+            if operation == "call_tool":
+                name = request["name"]
+                arguments = request["arguments"]
+
+                if not (isinstance(name, str) and isinstance(arguments, dict)):
+                    raise ValueError("Invalid MCP tool request")
+
+                tool = self.tool_registry.get(name)
+                if tool is None:
+                    raise ValueError(f"Unknown MCP tool: {name}")
+
+                # Validate against the server's JSON Schema.
+                schema = tool.input_schema
+                Draft202012Validator.check_schema(schema)
+                Draft202012Validator(schema).validate(arguments)
+
+                # Run in the parent, NOT in the restricted worker.
+                result = await self.client.call_tool_mcp(
+                    name, arguments
+                )
+
+                if result.is_error:
+                    errors = [
+                        getattr(block, "text", str(block))
+                        for block in result.content
+                    ]
+                    raise RuntimeError(
+                        "MCP tool reported an error: "
+                        + " ".join(errors)
+                    )
+
+                value = result.structured_content
+
+                if value is None:
+                    blocks = [as_dict(b) for b in result.content]
+                    if (
+                        len(blocks) == 1
+                        and blocks[0].get("type") == "text"
+                    ):
+                        value = blocks[0]["text"]
+                    else:
+                        value = blocks
+
+            elif operation == "list_resources":
+                items = await self.client.list_resources()
+                value = [as_dict(item) for item in items]
+
+            elif operation == "list_resource_templates":
+                items = await self.client.list_resource_templates()
+                value = [as_dict(item) for item in items]
+
+            elif operation == "read_resource":
+                uri = request["uri"]
+                if not isinstance(uri, str):
+                    raise ValueError("Resource URI must be a string")
+
+                items = await self.client.read_resource(uri)
+                value = [as_dict(item) for item in items]
+
+            elif operation == "list_prompts":
+                items = await self.client.list_prompts()
+                value = [as_dict(item) for item in items]
+
+            elif operation == "get_prompt":
+                name = request["name"]
+                arguments = request.get("arguments") or {}
+
+                if not isinstance(name, str):
+                    raise ValueError("Prompt name must be a string")
+
+                if not isinstance(arguments, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str)
+                    for k, v in arguments.items()
+                ):
+                    raise ValueError(
+                        "Prompt arguments must be a dict[str, str]"
+                    )
+
+                result = await self.client.get_prompt(
+                    name, arguments
+                )
+                value = as_dict(result)
+
+            else:
+                raise ValueError(
+                    f"Unsupported MCP operation: {operation}"
+                )
+
+            # Limit the data sent back to sandboxed Python.
+            encoded = json.dumps(
+                value, ensure_ascii=False, default=str
+            ).encode("utf-8")
+
+            limit = self.config.max_output_bytes
+            truncated = len(encoded) > limit
+
+            if truncated:
+                preview = encoded[:max(0, limit - 100)].decode(
+                    "utf-8", errors="ignore"
+                )
+                value = (
+                    preview
+                    + "\n[MCP output truncated: JSON preview only]"
+                )
+
+            return {
+                "type": "mcp_response",
+                "id": request_id,
+                "ok": True,
+                "value": value,
+                "truncated": truncated
+            }
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            error = (
+                f"{type(exc).__name__}: {exc}"
+            )[:2000]
+
+            return {
+                "type": "mcp_response",
+                "id": request_id,
+                "ok": False,
+                "error": error,
+                "truncated": False
+            }
+
     async def run_python(self, source: str) -> SandboxIntermediateResult:
         if self.config is None:
             raise RuntimeError("Sandbox configuration is not loaded")
@@ -608,6 +926,7 @@ class Sandbox:
         byte_count = 0
         char_count = 0
         truncated = False
+        tool_truncated = False
 
         def append_output(value: str) -> None:
             nonlocal byte_count, char_count, truncated
@@ -676,6 +995,31 @@ class Sandbox:
                     append_output(message.get("text", ""))
                     continue
 
+                if kind == "mcp_request":
+                    # MCP work executes outside the restricted worker.
+                    # Pause the sandbox-code timeout during this operation.
+                    pause_started = loop.time()
+
+                    try:
+                        response = await self._handle_mcp_request(message)
+
+                        process.stdin.write(
+                            (json.dumps(response, ensure_ascii=False) + "\n")
+                            .encode("utf-8")
+                        )
+
+                        await asyncio.wait_for(
+                            process.stdin.drain(),
+                            timeout=5
+                        )
+
+                        if response.get("truncated"):
+                            tool_truncated = True
+                    finally:
+                        deadline += loop.time() - pause_started
+
+                    continue
+
                 if kind == "control":
                     await self._stop_worker()
                     if message.get("name") == "KeyboardInterrupt":
@@ -693,7 +1037,7 @@ class Sandbox:
                             sandbox_output=answer,
                             status="final_answer",
                             final_answer=answer,
-                            truncated=truncated
+                            truncated=(truncated or tool_truncated)
                         )
 
                     append_output(message.get("error", ""))
@@ -704,16 +1048,24 @@ class Sandbox:
                             "\n[Sandbox: Output truncated due to size limits.]"
                         )
 
+                    if tool_truncated:
+                        output += (
+                            "\n[Sandbox: MCP tool output was truncated "
+                            "due to configured size limits.]"
+                        )
+
+                    was_truncated = truncated or tool_truncated
+
                     return SandboxIntermediateResult(
                         success=(status == "success"),
                         tool_name="python",
                         sandbox_output=output,
                         status=(
                             "truncated"
-                            if truncated and status == "success"
+                            if was_truncated and status == "success"
                             else status
                         ),
-                        truncated=truncated
+                        truncated=was_truncated
                     )
 
                 if kind == "memory_limit":
