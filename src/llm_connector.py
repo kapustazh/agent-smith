@@ -33,7 +33,9 @@ class LLMConnector:
     Connector with providers with a list of keys.
     """
 
-    def __init__(self, config: ProviderConfig) -> None:
+    def __init__(self,
+                 config: ProviderConfig,
+                 temperature: float = 0) -> None:
 
         if not config.api_keys:
             raise ValueError(
@@ -51,8 +53,11 @@ class LLMConnector:
             for key in config.api_keys
         ]
 
-        self._index = 0
+        self._index: int = 0
         self._lock = Lock()
+        self.retries: int = 0
+        # Temperature - value between 0.0 and 2.0
+        self.temperature = temperature
 
     @staticmethod
     def _should_retry(exc: Exception) -> bool:
@@ -82,12 +87,13 @@ class LLMConnector:
     ) -> Any:
         start = self._next_start_index()
         last_error: Exception | None = None
+        self.retries = 0
+        kwargs.setdefault('temperature', self.temperature)
 
         for offset in range(len(self._clients)):
             client = self._clients[
                 (start + offset) % len(self._clients)
             ]
-
             try:
                 return client.chat.completions.with_raw_response.create(
                     model=model or self.config.model,
@@ -96,9 +102,11 @@ class LLMConnector:
                 )
             except Exception as exc:
                 last_error = exc
-
+                print("Error: LLM Provider API access "
+                      f"(try:{self.retries+1}):", exc)
                 if not self._should_retry(exc):
                     raise
+            self.retries += 1
 
         raise LLMError(
             f"All {len(self._clients)} API keys failed "
@@ -114,6 +122,8 @@ class LLMConnector:
     ) -> Any:
         start = self._next_start_index()
         last_error: Exception | None = None
+        self.retries = 0
+        kwargs.setdefault('temperature', self.temperature)
 
         for offset in range(len(self._clients)):
             client = self._clients[
@@ -128,9 +138,11 @@ class LLMConnector:
                 )
             except Exception as exc:
                 last_error = exc
-
+                print("Error: LLM Provider API access "
+                      f"(try:{self.retries+1}):", exc)
                 if not self._should_retry(exc):
                     raise
+            self.retries += 1
 
         raise LLMError(
             f"All {len(self._clients)} API keys failed "
