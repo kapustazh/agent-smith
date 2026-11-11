@@ -10,7 +10,7 @@ import os
 import re
 # import selectors
 # import time
-import codeop
+# import codeop
 import signal
 import json
 import keyword
@@ -1193,72 +1193,97 @@ class Sandbox:
         return result
 
     async def read_command(self) -> Optional[str]:
+        """Read a complete command from stdin in either mode."""
+
         lines: list[str] = []
+        terminal_mode = sys.stdin.isatty()
 
         while True:
-            prompt = "sandbox> " if not lines else "... "
+            if terminal_mode:
+                prompt = "sandbox> " if not lines else "... "
+                print(prompt, end="")
+                sys.stdout.flush()
 
-            try:
-                line = await asyncio.to_thread(input, prompt)
-            except EOFError:
-                return "\n".join(lines) if lines else None
+            line = await asyncio.to_thread(sys.stdin.readline)
 
-            if not lines and line.strip() in EXIT_COMMANDS:
-                return line.strip()
+            if not line:
+                # EOF
+                return "".join(lines).strip() if lines else None
+
+            text = line.rstrip("\r\n")
+
+            if not lines and text.strip() in EXIT_COMMANDS:
+                return text.strip()
+
+            if COMMAND_END_MARKER in text:
+                before_marker = text.split(COMMAND_END_MARKER, 1)[0]
+                lines.append(before_marker)
+
+                command = "".join(lines).strip()
+
+                # Convert literal \n sequences into actual newlines
+                if "\\n" in command and "\n" not in command:
+                    command = command.replace("\\n", "\n")
+
+                return command
 
             lines.append(line)
-            source = "\n".join(lines)
-
-            try:
-                compiled = codeop.compile_command(
-                    source, "<sandbox>", "exec"
-                )
-            except (SyntaxError, OverflowError, ValueError):
-                return source
-
-            if compiled is not None:
-                return source
 
     async def run(self) -> None:
-        self.show_manual()
+        """Run the persistent interactive Sandbox.
+
+        Accept raw Python or LLM responses through stdin.
+        Each command ends with <<<END_COMMAND>>>.
+        """
+
+        terminal_mode = sys.stdin.isatty()
+        if terminal_mode:
+            self.show_manual()
 
         while True:
             data = await self.read_command()
 
-            if data is None or data in EXIT_COMMANDS:
+            if data is None or data.strip() in EXIT_COMMANDS:
                 # TODO: some quit function
-                print("Sandbox: Work complete,",
-                      "all connections terminated,",
-                      "all resources released. Bye!")
+                print(
+                    "Sandbox: Work complete,",
+                    "all connections terminated,",
+                    "all resources released. Bye!"
+                )
                 return
 
-            if not data:
+            if not data.strip():
                 continue
-
-            if data in ("manual", "manual()"):
-                self.show_manual()
-                continue
-            if data in ("show_tools", "show_tools()"):
-                result = SandboxIntermediateResult(
-                    success=True,
-                    tool_name="show_tools",
-                    sandbox_output=self.show_tools()
-                )
-                print(result.model_dump_json())
-                sys.stdout.flush()
-                continue
-
-            call: Optional[ParsedCall] = None
 
             try:
-                result = await self.run_python(data)
+                if data.strip() in ("manual", "manual()"):
+                    self.show_manual()
+                    continue
+                if data.strip() in ("show_tools", "show_tools()"):
+                    result = SandboxIntermediateResult(
+                        success=True,
+                        tool_name="show_tools",
+                        sandbox_output=self.show_tools(),
+                        status="success"
+                    )
+                    # print(result.model_dump_json())
+                    # sys.stdout.flush()
+                    # continue
+                # Process LLM responses containing code fences
+                elif "```" in data:
+                    result = await self.execute_llm_response(data)
+                # Execute raw Python code
+                else:
+                    result = await self.run_python(data)
+
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as e:
                 result = SandboxIntermediateResult(
                     success=False,
-                    tool_name=call.name if call else "sandbox",
-                    sandbox_output=str(e)
+                    tool_name="sandbox",
+                    sandbox_output=f"{type(e).__name__}: {e}",
+                    status="error"
                 )
             print(result.model_dump_json())
             sys.stdout.flush()
