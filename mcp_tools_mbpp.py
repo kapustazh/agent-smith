@@ -1,15 +1,16 @@
 from pathlib import Path
 from typing import Annotated
 
+import typer
 from fastmcp import FastMCP
 from pydantic import ValidationError
-import typer
 
 from src.config_model import SandboxConfig
 from src.mbpp_executor import (
-    MBPPExecutionRequest, execute_mbpp, execution_result,
+    MBPPExecutionRequest,
+    execute_mbpp,
+    execution_result,
 )
-
 
 app = typer.Typer(add_completion=False)
 
@@ -19,24 +20,31 @@ class MBPPTools:
         self.config = config or SandboxConfig()
 
     async def run_tests(
-        self, code: str, test_list: list[str],
+        self,
+        code: str,
+        test_list: list[str],
         test_imports: list[str] | None = None,
     ) -> str:
         try:
             request = MBPPExecutionRequest(
-                code=code, test_list=test_list, config=self.config,
+                code=code,
+                test_list=test_list,
+                config=self.config,
                 test_imports=test_imports if test_imports is not None else [],
             )
         except ValidationError as error:
             details = "; ".join(
-                ".".join(str(part)
-                         for part in item["loc"]) + ": " + item["msg"]
+                ".".join(str(part) for part in item["loc"])
+                + ": " + item["msg"]
                 for item in error.errors(
                     include_input=False, include_url=False)
             )
             return execution_result(
-                False, "Invalid MBPP request: " + details +
-                " No code or tests were executed. Supply code and assertions; "
+                False,
+                "Invalid MBPP request: "
+                + details
+                + " No code or tests were executed. "
+                "Supply code and assertions; "
                 "import entries must be non-empty.",
                 self.config,
             ).model_dump_json()
@@ -45,8 +53,10 @@ class MBPPTools:
 
 
 def task_resource() -> dict[str, str]:
-    return {"runtime": "deno/pyodide",
-            "tool": "run_tests(code, test_list, test_imports=None)"}
+    return {
+        "runtime": "deno/pyodide",
+        "tool": "run_tests(code, test_list, test_imports=None)",
+    }
 
 
 def mbpp_solver() -> str:
@@ -63,15 +73,23 @@ def mbpp_solver() -> str:
 
 def create_server(config: SandboxConfig | None = None) -> FastMCP:
     server = FastMCP("Agent Smith - MBPP")
-    server.tool(MBPPTools(config).run_tests, description=(
-        "Test a candidate against supplied assertions in the Deno sandbox."
-        "\n\nOptional test_imports run before the solution and assertions.\n"
-        "Returns JSON with success and output, including setup/test errors.\n"
-        "Limits come from server configuration. No hidden tests are read."
-    ))
-    server.resource("agent://mbpp/task", description=(
-        "Server metadata; the caller supplies task code and public tests."
-    ))(task_resource)
+    server.tool(
+        MBPPTools(config).run_tests,
+        description=(
+            "Test a candidate against supplied assertions in the Deno sandbox."
+            "\n\nOptional test_imports run before the solution "
+            "and assertions.\n"
+            "Returns JSON with success and output, "
+            "including setup/test errors.\n"
+            "Limits come from server configuration. No hidden tests are read."
+        ),
+    )
+    server.resource(
+        "agent://mbpp/task",
+        description=(
+            "Server metadata; the caller supplies task code and public tests."
+        ),
+    )(task_resource)
     server.prompt()(mbpp_solver)
     return server
 
@@ -81,9 +99,15 @@ mcp = create_server()
 
 @app.command()
 def main(
-    config: Annotated[Path | None, typer.Option(
-        "--sandbox-config", exists=True, dir_okay=False, readable=True,
-    )] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--sandbox-config",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ] = None,
     transport: str = "stdio",
     host: str = "127.0.0.1",
     port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,

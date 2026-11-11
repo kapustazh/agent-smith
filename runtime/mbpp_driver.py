@@ -262,14 +262,13 @@ class CandidateRuntime:
         return True
 
     def report_error(self, error: BaseException, filename: str) -> None:
-        print("Error while executing %s:" % filename, file=sys.stderr)
         report = traceback.TracebackException.from_exception(error)
         pending = [report]
         while pending:
             entry = pending.pop()
             frames = []
             for frame in entry.stack:
-                if frame.filename == "<exec>":
+                if frame.filename not in self.sources:
                     continue
                 lines = self.sources.get(frame.filename, "").splitlines()
                 line = (lines[frame.lineno - 1] if frame.lineno and
@@ -282,6 +281,13 @@ class CandidateRuntime:
             pending.extend(related for related in (
                 entry.__cause__, entry.__context__,
             ) if related is not None)
+        location = filename
+        if isinstance(error, SyntaxError) and error.filename in self.sources:
+            location = f"{error.filename}, line {error.lineno}"
+        elif report.stack:
+            frame = report.stack[-1]
+            location = f"{frame.filename}, line {frame.lineno}"
+        print(f"{type(error).__name__} in {location}:", file=sys.stderr)
         print("".join(report.format()), end="", file=sys.stderr)
 
 

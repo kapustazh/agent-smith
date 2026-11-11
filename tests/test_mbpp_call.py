@@ -163,12 +163,47 @@ class CallTests(unittest.IsolatedAsyncioTestCase):
         broken = ASSERTION.replace("==", "=")
         result = await self.call(SOLUTION, [broken])
         self.assertFalse(result["success"])
-        self.assertIn("Error while executing <test 1>", result["output"])
+        self.assertTrue(result["output"].startswith(
+            "SyntaxError in <test 1>, line 1:"), result)
         self.assertIn('File "<test 1>", line 1', result["output"])
         self.assertIn(broken, result["output"])
         self.assertIn("^", result["output"])
         self.assertIn("SyntaxError", result["output"])
         self.assertNotIn("<exec>", result["output"])
+        self.assertNotIn("ast.py", result["output"])
+
+    async def test_syntax_locations_are_relative_to_submitted_sources(
+        self,
+    ) -> None:
+        for code, tests, imports, filename in (
+            ("def solve():\n    return (1 + )", ["assert True"], None,
+             "<solution>"),
+            ("def solve(): return 1",
+             ["assert True\nassert solve() = 1"], None, "<test 1>"),
+            ("pass", ["assert True"],
+             ["import math", "from math import ("], "<test imports>"),
+        ):
+            with self.subTest(filename=filename):
+                result = await self.call(code, tests, imports)
+                self.assertFalse(result["success"], result)
+                self.assertTrue(result["output"].startswith(
+                    f"SyntaxError in {filename}, line 2:"), result)
+                self.assertIn(f'File "{filename}", line 2', result["output"])
+                self.assertIn("^", result["output"])
+                self.assertNotIn("ast.py", result["output"])
+                self.assertNotIn("<exec>", result["output"])
+
+    async def test_library_errors_point_to_the_solution_call(self) -> None:
+        result = await self.call(
+            "import json\ndef solve():\n    return json.loads('bad json')",
+            ["assert solve() == 1"],
+        )
+        self.assertFalse(result["success"], result)
+        self.assertTrue(result["output"].startswith(
+            "JSONDecodeError in <solution>, line 3:"), result)
+        self.assertIn("return json.loads('bad json')", result["output"])
+        self.assertIn("Expecting value", result["output"])
+        self.assertNotIn("/lib/python", result["output"])
 
     async def test_runtime_error_keeps_solution_lines_and_chained_causes(
         self,
@@ -180,6 +215,8 @@ class CallTests(unittest.IsolatedAsyncioTestCase):
             ["assert solve() == 1"],
         )
         self.assertFalse(result["success"])
+        self.assertTrue(result["output"].startswith(
+            "ValueError in <solution>, line 5:"), result)
         self.assertIn('File "<solution>", line 3', result["output"])
         self.assertIn("1 / 0", result["output"])
         self.assertIn('File "<test 1>", line 1', result["output"])

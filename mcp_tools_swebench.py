@@ -1,12 +1,12 @@
 import asyncio
+import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
-import signal
 from typing import Annotated, Any, AsyncIterator, Callable
 
+import typer
 from anyio import CancelScope
 from fastmcp import FastMCP
-import typer
 
 from src.config_model import SandboxConfig, SWEBenchTaskInput
 from src.swebench_docker import DockerSession
@@ -15,53 +15,72 @@ from src.swebench_tools import RepositoryTools
 
 class SWEBenchMCP:
     def __init__(
-        self, root: Path | None, config: SandboxConfig,
+        self,
+        root: Path | None,
+        config: SandboxConfig,
         task: SWEBenchTaskInput | None,
     ) -> None:
-        self.session = DockerSession(
-            task, config) if task is not None else None
+        self.session = (
+            DockerSession(task, config) if task is not None else None)
         self.lock = self.session.lock if self.session else asyncio.Lock()
-        self.repository = (self.session.repository if self.session else
-                           RepositoryTools(root, config))
-        self.server = FastMCP("Agent Smith - SWE-bench",
-                              lifespan=self.lifespan)
+        self.repository = (
+            self.session.repository if self.session else
+            RepositoryTools(root, config)
+        )
+        self.server = FastMCP(
+            "Agent Smith - SWE-bench", lifespan=self.lifespan)
         for method, description in (
             (self.read_file, "Read numbered UTF-8 lines."),
             (self.edit_file, "Replace exactly one text match."),
             (self.list_files, "Recursively list matching files."),
             (self.search_code, "Find regex matches and locations."),
-            (self.search_function_or_class_definition_in_code,
-             "Find exact Python function and class definitions."),
-            (self.find_references,
-             "Find Python references and aliases at a 1-based source line."),
+            (
+                self.search_function_or_class_definition_in_code,
+                "Find exact Python function and class definitions.",
+            ),
+            (
+                self.find_references,
+                "Find Python references and aliases at a 1-based source line.",
+            ),
         ):
             self.server.tool(method, description=description)
-        self.server.tool(self.run_command, description=(
-            "Run a container command and return output and exit code."
-        ))
-        self.server.tool(self.run_tests, description=(
-            "Run eval_script with the prepared environment on a disposable "
-            "copy.\n\nReturns script logs and exit_code, not a benchmark "
-            "verdict."
-        ))
-        self.server.tool(self.get_patch, description=(
-            "Get a patch against the original commit, including new files."
-            "\n\nOversized patches return an error instead of an incomplete "
-            "patch."
-        ))
-        self.server.resource("agent://swebench/task", description=(
-            "Task metadata and execution configuration status."
-        ))(self.task_resource)
-        self.server.prompt(description=(
-            "Instructions for solving the task with these tools."
-        ))(self.swebench_solver)
+        self.server.tool(
+            self.run_command,
+            description=(
+                "Run a container command and return output and exit code."),
+        )
+        self.server.tool(
+            self.run_tests,
+            description=(
+                "Run eval_script with the prepared environment "
+                "on a disposable copy.\n\nReturns script logs and exit_code, "
+                "not a benchmark "
+                "verdict."
+            ),
+        )
+        self.server.tool(
+            self.get_patch,
+            description=(
+                "Get a patch against the original commit, including new files."
+                "\n\nOversized patches return an error instead of "
+                "an incomplete patch."
+            ),
+        )
+        self.server.resource(
+            "agent://swebench/task",
+            description=("Task metadata and execution configuration status."),
+        )(self.task_resource)
+        self.server.prompt(
+            description=("Instructions for solving the task with these tools.")
+        )(self.swebench_solver)
 
     async def call_repository(
-        self, method: Callable[..., str], *args: Any,
+        self,
+        method: Callable[..., str],
+        *args: Any,
     ) -> str:
         async with self.lock:
-            work = asyncio.create_task(asyncio.to_thread(
-                method, *args))
+            work = asyncio.create_task(asyncio.to_thread(method, *args))
             try:
                 return await asyncio.shield(work)
             finally:
@@ -69,38 +88,56 @@ class SWEBenchMCP:
                     await work
 
     async def read_file(
-        self, filepath: str, start_line: int = 1, end_line: int | None = None,
+        self,
+        filepath: str,
+        start_line: int = 1,
+        end_line: int | None = None,
     ) -> str:
         return await self.call_repository(
-            self.repository.read_file, filepath, start_line, end_line)
+            self.repository.read_file, filepath, start_line, end_line
+        )
 
     async def edit_file(
-        self, filepath: str, old_str: str, new_str: str,
+        self,
+        filepath: str,
+        old_str: str,
+        new_str: str,
     ) -> str:
         return await self.call_repository(
-            self.repository.edit_file, filepath, old_str, new_str)
+            self.repository.edit_file, filepath, old_str, new_str
+        )
 
     async def list_files(
-        self, directory: str = ".", pattern: str = "*",
+        self,
+        directory: str = ".",
+        pattern: str = "*",
     ) -> str:
         return await self.call_repository(
-            self.repository.list_files, directory, pattern)
+            self.repository.list_files, directory, pattern
+        )
 
     async def search_code(self, pattern: str, file_pattern: str = "*") -> str:
         return await self.call_repository(
-            self.repository.search_code, pattern, file_pattern)
+            self.repository.search_code, pattern, file_pattern
+        )
 
     async def search_function_or_class_definition_in_code(
-        self, name: str,
+        self,
+        name: str,
     ) -> str:
         return await self.call_repository(
-            self.repository.search_function_or_class_definition_in_code, name)
+            self.repository.search_function_or_class_definition_in_code, name
+        )
 
     async def find_references(
-        self, name: str, filepath: str, line: int,
+        self,
+        name: str,
+        filepath: str,
+        line: int,
     ) -> str:
         return await self.call_repository(
-            self.repository.find_references, name, filepath, line)
+            self.repository.find_references, name, filepath, line
+        )
 
     @asynccontextmanager
     async def lifespan(self, server: FastMCP) -> AsyncIterator[dict[str, str]]:
@@ -117,11 +154,14 @@ class SWEBenchMCP:
         if self.session is None:
             raise self.repository._error(
                 "Execution requires --task-file with docker_image and "
-                "eval_script. TESTBED_PATH configures repository tools only.")
+                "eval_script. TESTBED_PATH configures repository tools only."
+            )
         return self.session
 
     async def run_command(
-        self, command: str, workdir: str = "/testbed",
+        self,
+        command: str,
+        workdir: str = "/testbed",
     ) -> str:
         return await self.execution().run_command(command, workdir)
 
@@ -133,11 +173,16 @@ class SWEBenchMCP:
 
     def task_resource(self) -> dict[str, str]:
         if self.session is None:
-            return {"execution": "requires --task-file",
-                    "repository": str(self.repository.root)}
-        return {"instance_id": self.session.task.instance_id,
-                "problem_statement": self.session.task.problem_statement,
-                "repository": "/testbed", "execution": "docker"}
+            return {
+                "execution": "requires --task-file",
+                "repository": str(self.repository.root),
+            }
+        return {
+            "instance_id": self.session.task.instance_id,
+            "problem_statement": self.session.task.problem_statement,
+            "repository": "/testbed",
+            "execution": "docker",
+        }
 
     def swebench_solver(self) -> str:
         return (
@@ -149,7 +194,8 @@ class SWEBenchMCP:
 
 
 def create_server(
-    root: Path | None = None, config: SandboxConfig | None = None,
+    root: Path | None = None,
+    config: SandboxConfig | None = None,
     task: SWEBenchTaskInput | None = None,
 ) -> FastMCP:
     return SWEBenchMCP(root, config or SandboxConfig(), task).server
@@ -161,12 +207,24 @@ app = typer.Typer(add_completion=False)
 
 @app.command()
 def main(
-    config: Annotated[Path | None, typer.Option(
-        "--sandbox-config", exists=True, dir_okay=False, readable=True,
-    )] = None,
-    task_file: Annotated[Path | None, typer.Option(
-        "--task-file", exists=True, dir_okay=False, readable=True,
-    )] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--sandbox-config",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ] = None,
+    task_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--task-file",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ] = None,
     transport: str = "stdio",
     host: str = "127.0.0.1",
     port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,

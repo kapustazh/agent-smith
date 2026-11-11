@@ -73,6 +73,38 @@ class LLMConnector:
             self._index = (self._index + 1) % len(self._clients)
             return index
 
+    def chat_raw(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        *,
+        model: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        start = self._next_start_index()
+        last_error: Exception | None = None
+
+        for offset in range(len(self._clients)):
+            client = self._clients[
+                (start + offset) % len(self._clients)
+            ]
+
+            try:
+                return client.chat.completions.with_raw_response.create(
+                    model=model or self.config.model,
+                    messages=messages,
+                    **kwargs,
+                )
+            except Exception as exc:
+                last_error = exc
+
+                if not self._should_retry(exc):
+                    raise
+
+        raise LLMError(
+            f"All {len(self._clients)} API keys failed "
+            f"for provider {self.config.name}"
+        ) from last_error
+
     def chat(
         self,
         messages: list[ChatCompletionMessageParam],
