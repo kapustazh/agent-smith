@@ -7,6 +7,7 @@ import ast
 # import subprocess
 import builtins
 import os
+import re
 # import selectors
 # import time
 import codeop
@@ -119,7 +120,7 @@ def parse_tool_call(source: str) -> ParsedCall:
 def validate_tool_call(
     call: ParsedCall,
     tool_registry: dict[str, Tool]
-) -> Tool | None:
+) -> Optional[Tool]:
     if call.name == "final_answer":
         positional_args = call.positional_arguments
         keyword_args = call.keyword_arguments
@@ -238,7 +239,7 @@ def get_python_type(prop: Any) -> str:
     return types.get(typ, "Any")
 
 
-def schema_to_signature(tool: Tool, python_name: str | None = None) -> str:
+def schema_to_signature(tool: Tool, python_name: Optional[str] = None) -> str:
     schema = tool.input_schema or {}
     properties = schema.get("properties", {})
     required = set(schema.get("required", []))
@@ -275,12 +276,12 @@ def schema_to_signature(tool: Tool, python_name: str | None = None) -> str:
 
 
 def manual(
-    tools: list[Tool] | None,
-    aliases: dict[str, str] | None = None,
-    resources: list[Any] | None = None,
-    prompts: list[Any] | None = None,
-    resource_templates: list[Any] | None = None,
-    discovery_errors: dict[str, str] | None = None
+    tools: Optional[list[Tool]],
+    aliases: Optional[dict[str, str]] = None,
+    resources: Optional[list[Any]] = None,
+    prompts: Optional[list[Any]] = None,
+    resource_templates: Optional[list[Any]] = None,
+    discovery_errors: Optional[dict[str, str]] = None
 ) -> str:
     """Generate the dynamic manual the LLM receives in the system prompt."""
 
@@ -415,6 +416,48 @@ def build_mcp_aliases(
         reserved.add(alias)
 
     return aliases
+
+
+def extract_llm_code(
+    response: str
+) -> tuple[Optional[str], Optional[str]]:
+    """Extract Python code and describe any recovery performed."""
+
+    pattern = re.compile(
+        r"(?ms)^[ \t]*```(?:python|py)[ \t]*\r?\n"
+        r"(.*?)^[ \t]*```[ \t]*(?:\r?\n|$)"
+    )
+
+    matches = list(pattern.finditer(response))
+
+    if len(matches) > 1:
+        return None, "Multiple Python code blocks found. Expected exactly one."
+
+    if len(matches) == 1:
+        code = matches[0].group(1).strip()
+        if not code:
+            return None, "Python code block is empty."
+        return code, None
+
+    # Recover a missing closing fence.
+    opening = re.compile(
+        r"(?m)^[ \t]*```(?:python|py)[ \t]*\r?\n"
+    )
+    openings = list(opening.finditer(response))
+
+    if len(openings) == 1 and "```" not in response[openings[0].end():]:
+        code = response[openings[0].end():].strip()
+        if code:
+            return code, (
+                "Malformed code block: missing closing fence. "
+                "Recovered by treating all text after the "
+                "opening Python fence as executable code."
+            )
+
+    return None, (
+        "No valid Python code block found. "
+        "Provide exactly one fenced ```python block."
+    )
 
 
 class Sandbox:
@@ -1109,7 +1152,47 @@ class Sandbox:
                 sandbox_output=f"Worker communication failed: {exc}",
             )
 
-    async def read_command(self) -> str | None:
+    async def execute_llm_response(
+        self,
+        response: str
+    ) -> SandboxIntermediateResult:
+        """Process an LLM response."""
+
+        code, feedback = extract_llm_code(response)
+
+        if code is None:
+            return SandboxIntermediateResult(
+                success=False,
+                tool_name="python",
+                status="no_code",
+                sandbox_output=feedback or "No executable code."
+            )
+
+        # Execute using the existing restricted worker.
+        result = await self.run_python(code)
+
+        if feedback:
+            output = result.sandbox_output
+            if isinstance(output, list):
+                output = "\n".join(output)
+
+            result = result.model_copy(
+                update={
+                    "sandbox_output": (
+                        f"[Code recovery] {feedback}\n"
+                        f"{output}"
+                    ),
+                    "status": (
+                        "recovered_code"
+                        if result.status == "success"
+                        else result.status
+                    )
+                }
+            )
+
+        return result
+
+    async def read_command(self) -> Optional[str]:
         lines: list[str] = []
 
         while True:
