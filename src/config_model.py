@@ -1,8 +1,8 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Literal
 
 # Color constants
 GREEN = "\033[92m"
@@ -53,7 +53,7 @@ class SandboxConfig(BaseModel):
         "heapq", "bisect", "copy",
         "string", "random",
         "datetime", "datetime.*",
-        "array", "cmath",])
+        "array", "cmath"])
     allowed_directories: list[str] = Field(
         default_factory=lambda: ["/testbed", "/tmp/agent"])
     max_execution_time_seconds: int = Field(default=30, gt=0, strict=True)
@@ -71,6 +71,28 @@ class SandboxIntermediateResult(BaseModel):
         description="Name of the tool or function that was executed")
     sandbox_output: str | list[str] = Field(
         description="Sandbox execution result (stdout/stderr/error message)")
+
+    status: Literal[
+        "success",
+        "error",
+        "timeout",
+        "truncated",
+        "syntax_error",
+        "no_code",
+        "recovered_code",
+        "final_answer",
+        "memory_limit"
+    ] | None = None
+
+    partial: bool = False
+    truncated: bool = False
+    final_answer: str | None = None
+
+    @model_validator(mode="after")
+    def default_status(self):
+        if self.status is None:
+            self.status = "success" if self.success else "error"
+        return self
 
 
 # --- for MBPP and
