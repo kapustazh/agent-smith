@@ -132,6 +132,7 @@ def create_mcp_namespace(
 
 class OutputStream:
     """Forward sandbox output to the parent as JSON messages."""
+
     def __init__(self, name: str):
         self.name = name
 
