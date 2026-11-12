@@ -251,8 +251,7 @@ def schema_to_signature(tool: Tool, python_name: Optional[str] = None) -> str:
         if name in required:
             params.append(f"{name}: {annotation}")
         else:
-            # params.append(f"{name}: {annotation} | None = None")
-            params.append(f"{name}: {annotation} (optional)")
+            params.append(f"{name}: {annotation} | None = None")
 
     name = python_name or tool.name
     result = f"- {name}({', '.join(params)})"
@@ -278,47 +277,48 @@ def schema_to_signature(tool: Tool, python_name: Optional[str] = None) -> str:
 def manual(
     tools: Optional[list[Tool]],
     aliases: Optional[dict[str, str]] = None,
-    resources: Optional[list[Any]] = None,
-    prompts: Optional[list[Any]] = None,
-    resource_templates: Optional[list[Any]] = None,
-    discovery_errors: Optional[dict[str, str]] = None
+    # resources: Optional[list[Any]] = None,
+    # prompts: Optional[list[Any]] = None,
+    # resource_templates: Optional[list[Any]] = None,
+    # discovery_errors: Optional[dict[str, str]] = None
 ) -> str:
     """Generate the dynamic manual the LLM receives in the system prompt."""
 
     lines = [
-        #  # Propose start
-        "Sandbox execution manual",
-        "",
-        "Write Python code in one code block per agent step.",
-        "MCP tools are available as Python functions.",
-        "Use keyword arguments for MCP tool calls.",
-        "MCP results can be strings, dictionaries, or lists.",
-        "Use final_answer(answer_string) to finish.",
-        "",
-        "Built-in function:",
-        "- final_answer(answer: str)",
-        "",
-        "MCP helper functions:",
-        "- mcp_call_tool(name: str, **kwargs)",
-        "- mcp_list_resources()",
-        "- mcp_list_resource_templates()",
-        "- mcp_read_resource(uri: str)",
-        "- mcp_list_prompts()",
-        "- mcp_get_prompt(name: str, arguments: dict | None = None)",
-        "",
-        "Available MCP tools:"
-        #  # Propose end
-        # "Sandbox execution manual:",
-        # "- Write exactly one Python code block per step.",
-        # "- Tool calls are ordinary Python function calls.",
-        # "- Use final_answer(answer_string) when the task is solved.",
-        # "- Positional arguments are rejected for MCP tools;" +
-        # "use keyword arguments.\n",
-        # "Available tools:",
-        # "- final_answer(answer: str): terminate the agent loop and " +
-        # "return the solution."
-        # # "- show_tools(): show available tool names",
-        # # "- print(text: str): print a result"
+        # #  # Propose start
+        # "Sandbox execution manual",
+        # "",
+        # "Write Python code in one code block per agent step.",
+        # "MCP tools are available as Python functions.",
+        # "Use keyword arguments for MCP tool calls.",
+        # "MCP results can be strings, dictionaries, or lists.",
+        # "Use final_answer(answer_string) to finish.",
+        # "",
+        # "Built-in function:",
+        # "- final_answer(answer: str)",
+        # # "- validate_edited_python(source: str, filename: str)",
+        # "",
+        # "MCP helper functions:",
+        # "- mcp_call_tool(name: str, **kwargs)",
+        # "- mcp_list_resources()",
+        # "- mcp_list_resource_templates()",
+        # "- mcp_read_resource(uri: str)",
+        # "- mcp_list_prompts()",
+        # "- mcp_get_prompt(name: str, arguments: dict | None = None)",
+        # "",
+        # "Available MCP tools:"
+        # #  # Propose end
+        "Sandbox execution manual:",
+        "- Write exactly one Python code block per step.",
+        "- Tool calls are ordinary Python function calls.",
+        "- Use final_answer(answer_string) when the task is solved.",
+        "- Positional arguments are rejected for MCP tools;" +
+        "use keyword arguments.\n",
+        "Available tools:",
+        "- final_answer(answer: str)" +
+        "\n  Description: terminate the agent loop and return the solution."
+        # "- show_tools(): show available tool names",
+        # "- print(text: str): print a result"
     ]
 
     registry = {tool.name: tool for tool in (tools or [])}
@@ -330,41 +330,41 @@ def manual(
                     registry[original_name], python_name
                 )
             )
-    else:
-        lines.append("(No MCP tools available)")
+    # else:
+    #     lines.append("(No MCP tools available)")
 
-    lines.append("\nAvailable MCP resources:")
+    # lines.append("\nAvailable MCP resources:")
 
-    for resource in resources or []:
-        lines.append(
-            f"- {resource.uri}: "
-            f"{resource.description or ''}"
-        )
+    # for resource in resources or []:
+    #     lines.append(
+    #         f"- {resource.uri}: "
+    #         f"{resource.description or ''}"
+    #     )
 
-    lines.append("\nAvailable resource templates:")
+    # lines.append("\nAvailable resource templates:")
 
-    for template in resource_templates or []:
-        lines.append(
-            f"- {template.uri_template}: "
-            f"{template.description or ''}"
-        )
+    # for template in resource_templates or []:
+    #     lines.append(
+    #         f"- {template.uri_template}: "
+    #         f"{template.description or ''}"
+    #     )
 
-    lines.append("\nAvailable MCP prompts:")
+    # lines.append("\nAvailable MCP prompts:")
 
-    for prompt in prompts or []:
-        args = [
-            f"{arg.name}{' (required)' if arg.required else ''}"
-            for arg in (prompt.arguments or [])
-        ]
-        lines.append(
-            f"- {prompt.name}({', '.join(args)}): "
-            f"{prompt.description or ''}"
-        )
+    # for prompt in prompts or []:
+    #     args = [
+    #         f"{arg.name}{' (required)' if arg.required else ''}"
+    #         for arg in (prompt.arguments or [])
+    #     ]
+    #     lines.append(
+    #         f"- {prompt.name}({', '.join(args)}): "
+    #         f"{prompt.description or ''}"
+    #     )
 
-    if discovery_errors:
-        lines.append("\nMCP discovery warnings:")
-        for capability, error in discovery_errors.items():
-            lines.append(f"- {capability}: {error}")
+    # if discovery_errors:
+    #     lines.append("\nMCP discovery warnings:")
+    #     for capability, error in discovery_errors.items():
+    #         lines.append(f"- {capability}: {error}")
 
     return "\n".join(lines)
 
@@ -381,18 +381,19 @@ def build_tool_registry(tools: list[Tool]) -> dict[str, Tool]:
 
 
 def build_mcp_aliases(
-    registry: dict[str, Tool],
+    registry: dict[str, Tool]
 ) -> dict[str, str]:
     """Map valid Python function names to original MCP tool names."""
 
     reserved = set(dir(builtins)) | {
         "final_answer",
-        "mcp_call_tool",
-        "mcp_read_resource",
-        "mcp_get_prompt",
-        "mcp_list_resources",
-        "mcp_list_resource_templates",
-        "mcp_list_prompts"
+        # "mcp_call_tool",
+        # "mcp_read_resource",
+        # "mcp_get_prompt",
+        # "mcp_list_resources",
+        # "mcp_list_resource_templates",
+        # "mcp_list_prompts",
+        "validate_edited_python"
     }
 
     aliases: dict[str, str] = {}
@@ -421,42 +422,76 @@ def build_mcp_aliases(
 def extract_llm_code(
     response: str
 ) -> tuple[Optional[str], Optional[str]]:
-    """Extract Python code and describe any recovery performed."""
+    """Extract one Python block, reporting any recovery."""
 
-    pattern = re.compile(
-        r"(?ms)^[ \t]*```(?:python|py)[ \t]*\r?\n"
-        r"(.*?)^[ \t]*```[ \t]*(?:\r?\n|$)"
-    )
+    blocks: list[tuple[str, str, bool]] = []
+    in_block: bool = False
+    language: str = ""
+    current: list[str] = []
 
-    matches = list(pattern.finditer(response))
+    for line in response.splitlines(keepends=True):
+        text = line.strip()
 
-    if len(matches) > 1:
-        return None, "Multiple Python code blocks found. Expected exactly one."
+        if not in_block:
+            if text.startswith("```"):
+                language = text[3:].strip().lower()
+                current = []
+                in_block = True
+            continue
 
-    if len(matches) == 1:
-        code = matches[0].group(1).strip()
-        if not code:
-            return None, "Python code block is empty."
-        return code, None
-
-    # Recover a missing closing fence.
-    opening = re.compile(
-        r"(?m)^[ \t]*```(?:python|py)[ \t]*\r?\n"
-    )
-    openings = list(opening.finditer(response))
-
-    if len(openings) == 1 and "```" not in response[openings[0].end():]:
-        code = response[openings[0].end():].strip()
-        if code:
-            return code, (
-                "Malformed code block: missing closing fence. "
-                "Recovered by treating all text after the "
-                "opening Python fence as executable code."
+        if text == "```":
+            blocks.append(
+                (language, "".join(current), True)
             )
+            in_block = False
+            current = []
+        else:
+            current.append(line)
 
-    return None, (
-        "No valid Python code block found. "
-        "Provide exactly one fenced ```python block."
+    if in_block:
+        blocks.append(
+            (language, "".join(current), False)
+        )
+
+    if not blocks:
+        return None, (
+            "No valid code block found. "
+            "Provide exactly one ```python block."
+        )
+
+    if len(blocks) != 1:
+        return None, (
+            f"Found {len(blocks)} fenced blocks. "
+            "Expected exactly one."
+        )
+
+    language, code, closed = blocks[0]
+
+    if language not in ("python", "py", ""):
+        return None, (
+            f"Unsupported code language: {language}. "
+            "Expected Python."
+        )
+
+    if not code.strip():
+        return None, "Python code block is empty."
+
+    recovery = []
+
+    if not language:
+        recovery.append(
+            "Unlabeled code fence interpreted as Python."
+        )
+
+    if not closed:
+        recovery.append(
+            "Closing fence missing; all remaining text "
+            "was interpreted as Python code."
+        )
+
+    return (
+        code.rstrip("\r\n"),
+        " ".join(recovery) if recovery else None
     )
 
 
@@ -475,11 +510,10 @@ class Sandbox:
         self.client: Optional[Client] = None
         self.tool_registry: dict[str, Tool] = {}
         self.tool_aliases: dict[str, str] = {}
-        self.resources: list[Any] = []
-        self.resource_templates: list[Any] = []
-        self.prompts: list[Any] = []
-        self.discovery_errors: dict[str, str] = {}
-        # self.mcp_wrappers: dict[str, Callable[..., Any]] = {}
+        # self.resources: list[Any] = []
+        # self.resource_templates: list[Any] = []
+        # self.prompts: list[Any] = []
+        # self.discovery_errors: dict[str, str] = {}
         self._stack = AsyncExitStack()
         self._worker: Optional[asyncio.subprocess.Process] = None
 
@@ -552,7 +586,10 @@ class Sandbox:
             if path.is_dir():
                 return str(path)
 
-        raise RuntimeError("No allowed execution directory exists")
+        # raise RuntimeError("No allowed execution directory exists")
+        path = Path("/tmp/agent")
+        os.mkdir(path)
+        return str(path)
 
     async def _start_worker(self) -> None:
         """Start the worker if it is not already running."""
@@ -718,10 +755,10 @@ class Sandbox:
             manual(
                 tools=list(self.tool_registry.values()),
                 aliases=self.tool_aliases,
-                resources=self.resources,
-                prompts=self.prompts,
-                resource_templates=self.resource_templates,
-                discovery_errors=self.discovery_errors
+                # resources=self.resources,
+                # prompts=self.prompts,
+                # resource_templates=self.resource_templates,
+                # discovery_errors=self.discovery_errors
             )
         )
         sys.stdout.flush()
@@ -729,12 +766,13 @@ class Sandbox:
     def show_tools(self) -> list[str]:
         return [
             "final_answer",
-            "mcp_call_tool",
-            "mcp_read_resource",
-            "mcp_get_prompt",
-            "mcp_list_resources",
-            "mcp_list_resource_templates",
-            "mcp_list_prompts",
+            # "mcp_call_tool",
+            # "mcp_read_resource",
+            # "mcp_get_prompt",
+            # "mcp_list_resources",
+            # "mcp_list_resource_templates",
+            # "mcp_list_prompts",
+            # "validate_edited_python",
             *self.tool_aliases.keys()
         ]
 
@@ -1156,7 +1194,7 @@ class Sandbox:
         self,
         response: str
     ) -> SandboxIntermediateResult:
-        """Process an LLM response."""
+        """Extract and execute code from an LLM response."""
 
         code, feedback = extract_llm_code(response)
 
@@ -1173,28 +1211,72 @@ class Sandbox:
 
         if feedback:
             output = result.sandbox_output
+
             if isinstance(output, list):
                 output = "\n".join(output)
 
             result = result.model_copy(
                 update={
                     "sandbox_output": (
-                        f"[Code recovery] {feedback}\n"
-                        f"{output}"
+                        f"[Code recovery] {feedback}\n{output}"
                     ),
                     "status": (
                         "recovered_code"
                         if result.status == "success"
                         else result.status
-                    )
+                    ),
+                    "code_recovered": True,
+                    "recovery_details": feedback
                 }
             )
 
         return result
 
-    async def read_command(self) -> Optional[str]:
-        """Read a complete command from stdin in either mode."""
+    # #  With end_marker only
+    # async def read_command(self) -> tuple[Optional[str], bool]:
+    #     """Read one command terminated by <<<END_COMMAND>>>.
 
+    #     Returns (command, complete).
+    #     """
+
+    #     lines: list[str] = []
+    #     terminal_mode = sys.stdin.isatty()
+
+    #     while True:
+    #         if terminal_mode:
+    #             prompt = "sandbox> " if not lines else "... "
+    #             print(prompt, end="")
+    #             sys.stdout.flush()
+
+    #         line = await asyncio.to_thread(sys.stdin.readline)
+
+    #         if not line:
+    #             # EOF
+    #             if not lines:
+    #                 return None, True
+    #             return "".join(lines), False
+
+    #         text = line.rstrip("\r\n")
+
+    #         if not lines and text.strip() in EXIT_COMMANDS:
+    #             return text.strip(), True
+
+    #         if COMMAND_END_MARKER in text:
+    #             before_marker = text.split(COMMAND_END_MARKER, 1)[0]
+    #             lines.append(before_marker)
+
+    #             command = "".join(lines).strip()
+
+    #             # Convert literal \n sequences into actual newlines
+    #             if "\\n" in command and "\n" not in command:
+    #                 command = command.replace("\\n", "\n")
+
+    #             return command, True
+
+    #         lines.append(line)
+
+    # without end_marker
+    async def read_command(self) -> Optional[str]:
         lines: list[str] = []
         terminal_mode = sys.stdin.isatty()
 
@@ -1208,7 +1290,9 @@ class Sandbox:
 
             if not line:
                 # EOF
-                return "".join(lines).strip() if lines else None
+                if not lines:
+                    return None
+                return "".join(lines)
 
             text = line.rstrip("\r\n")
 
@@ -1236,6 +1320,7 @@ class Sandbox:
         Each command ends with <<<END_COMMAND>>>.
         """
 
+         #  With ctrl+D as end of a command
         terminal_mode = sys.stdin.isatty()
         if terminal_mode:
             self.show_manual()
@@ -1266,9 +1351,6 @@ class Sandbox:
                         sandbox_output=self.show_tools(),
                         status="success"
                     )
-                    # print(result.model_dump_json())
-                    # sys.stdout.flush()
-                    # continue
                 # Process LLM responses containing code fences
                 elif "```" in data:
                     result = await self.execute_llm_response(data)
@@ -1288,6 +1370,86 @@ class Sandbox:
             print(result.model_dump_json())
             sys.stdout.flush()
 
+        # terminal_mode = sys.stdin.isatty()
+
+        # if terminal_mode:
+        #     self.show_manual()
+
+        # while True:
+        #     data, complete = await self.read_command()
+
+        #     # Clean EOF.
+        #     if data is None:
+        #         # TODO: some quit function
+        #         return
+
+        #     # EOF before the expected delimiter.
+        #     if not complete:
+        #         # TODO: some quit function
+        #         result = SandboxIntermediateResult(
+        #             success=False,
+        #             tool_name="sandbox",
+        #             status="incomplete_input",
+        #             sandbox_output=(
+        #                 "Input ended before "
+        #                 f"{COMMAND_END_MARKER}. "
+        #                 "The partial command was not executed."
+        #             )
+        #         )
+        #         print(result.model_dump_json())
+        #         sys.stdout.flush()
+        #         return
+
+        #     if data.strip() in EXIT_COMMANDS:
+        #         # TODO: some quit function
+        #         return
+
+        #     if not data.strip() and terminal_mode:
+        #         continue
+
+        #     try:
+        #         if terminal_mode and data.strip() in (
+        #             "manual", "manual()"
+        #         ):
+        #             result = SandboxIntermediateResult(
+        #                 success=True,
+        #                 tool_name="manual",
+        #                 sandbox_output=self.get_manual()
+        #             )
+
+        #         elif terminal_mode and data.strip() in (
+        #             "show_tools", "show_tools()"
+        #         ):
+        #             result = SandboxIntermediateResult(
+        #                 success=True,
+        #                 tool_name="show_tools",
+        #                 sandbox_output=self.show_tools()
+        #             )
+
+        #         elif terminal_mode and "```" not in data:
+        #             # Terminal REPL supports raw Python.
+        #             result = await self.run_python(data)
+
+        #         else:
+        #             # Complete LLM response.
+        #             # Used by the Agent and for fenced terminal input.
+        #             result = await self.execute_llm_response(data)
+
+        #     except (KeyboardInterrupt, SystemExit):
+        #         raise
+        #     except Exception as exc:
+        #         result = SandboxIntermediateResult(
+        #             success=False,
+        #             tool_name="sandbox",
+        #             status="error",
+        #             sandbox_output=(
+        #                 f"{type(exc).__name__}: {exc}"
+        #             )
+        #         )
+
+        #     print(result.model_dump_json())
+        #     sys.stdout.flush()
+
 
 async def sandbox_main(
     template_path: Optional[Path] = None,
@@ -1302,7 +1464,7 @@ async def sandbox_main(
 def main(
     template_path: Optional[Path] = typer.Argument(
         None,
-        help="Path to the sandbox template JSON file.",
+        help="Path to the sandbox template JSON file."
     ),
     mcp_stdio: Optional[str] = typer.Option(
         None,
@@ -1312,7 +1474,7 @@ def main(
     mcp_server: Optional[str] = typer.Option(
         None,
         "--mcp-server",
-        help="MCP server URL.",
+        help="MCP server URL."
     )
 ) -> None:
     """
