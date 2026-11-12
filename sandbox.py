@@ -3,27 +3,19 @@ import sys
 import asyncio
 import shlex
 import ast
-# import resource
-# import subprocess
 import builtins
 import os
-import re
-# import selectors
-# import time
-# import codeop
 import signal
 import json
 import keyword
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError, ValidationError
 from contextlib import AsyncExitStack
 from types import TracebackType
-from typing import Optional, Any, Type, Callable
+from typing import Optional, Any, Type
 from pathlib import Path
 from fastmcp import Client
 from mcp.types import Tool
 from fastmcp.client.transports import StdioTransport
-from dataclasses import dataclass
 from src.config_model import SandboxConfig, SandboxIntermediateResult
 
 
@@ -32,180 +24,12 @@ COMMAND_END_MARKER = "<<<END_COMMAND>>>"
 EXIT_COMMANDS = {"exit", "exit()"}
 
 
-@dataclass(frozen=True)
-class ParsedCall:
-    name: str
-    positional_arguments: tuple[Any, ...]
-    keyword_arguments: dict[str, Any]
-
-
-# class FinalAnswerSignal(Exception):
-#     def __init__(self, answer: str) -> None:
-#         self.answer = answer
-
-
-# def final_answer(answer: Any) -> None:
-#     raise FinalAnswerSignal(answer)
-
-
-def make_mcp_wrapper(
-    tool_name: str,
-    invoke: Callable[[str, dict[str, Any]], Any]
-) -> Callable[..., Any]:
-    def wrapper(**kwargs: Any) -> Any:
-        return invoke(tool_name, kwargs)
-
-    wrapper.__name__ = tool_name
-    return wrapper
-
-
 # Init Typer app
 app = typer.Typer(
     add_completion=False,
     help=("Agent Smith - SandBox (MCP Client)"
           " - Launch an interactive sandbox environment.")
 )
-
-
-def parse_tool_call(source: str) -> ParsedCall:
-    try:
-        tree = ast.parse(source.strip(), mode="exec")
-    except SyntaxError as exc:
-        raise ValueError(f"Invalid Python syntax: {exc.msg}") from exc
-
-    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.Expr):
-        raise ValueError("Expected exactly one function call")
-
-    expression = tree.body[0].value
-
-    if not isinstance(expression, ast.Call):
-        raise ValueError("Expected a function call")
-
-    if not isinstance(expression.func, ast.Name):
-        raise ValueError("Only direct function calls are allowed")
-
-    positional_args: list[Any] = []
-
-    for arg in expression.args:
-        try:
-            positional_args.append(ast.literal_eval(arg))
-        except (ValueError, TypeError, SyntaxError) as e:
-            raise ValueError(
-                "Positional arguments must be literal values"
-            ) from e
-
-    keyword_args: dict[str, Any] = {}
-
-    for key_word in expression.keywords:
-        if key_word.arg is None:
-            raise ValueError("Unpacking keyword arguments is not allowed")
-
-        if key_word.arg in keyword_args:
-            raise ValueError(f"Duplicate argument: {key_word.arg}")
-
-        try:
-            keyword_args[key_word.arg] = ast.literal_eval(key_word.value)
-        except (ValueError, TypeError, SyntaxError) as e:
-            raise ValueError(
-                f"Argument '{key_word.arg}' must be a literal value"
-            ) from e
-
-    return ParsedCall(
-        name=expression.func.id,
-        positional_arguments=tuple(positional_args),
-        keyword_arguments=keyword_args
-    )
-
-
-def validate_tool_call(
-    call: ParsedCall,
-    tool_registry: dict[str, Tool]
-) -> Optional[Tool]:
-    if call.name == "final_answer":
-        positional_args = call.positional_arguments
-        keyword_args = call.keyword_arguments
-
-        if not (len(positional_args) == 1 and not keyword_args
-                or not positional_args and set(keyword_args) == {"answer"}):
-            raise ValueError(
-                "final_answer requires exactly one positional argument "
-                "or one 'answer' keyword argument"
-            )
-        # if not isinstance(call.arguments["answer"], str):
-        #     raise ValueError("final_answer.answer must be a string")
-        return None
-
-    if call.positional_arguments:
-        raise ValueError(
-            f"MCP tool '{call.name}' accepts keyword arguments only"
-        )
-
-    tool = tool_registry.get(call.name)
-    if tool is None:
-        raise ValueError(f"Unknown tool: {call.name}")
-
-    schema = tool.input_schema or {}
-
-    try:
-        validator = Draft202012Validator(schema)
-        validator.check_schema(schema)
-        validator.validate(call.keyword_arguments)
-    except SchemaError as exc:
-        raise ValueError(
-            f"Invalid schema for MCP tool '{call.name}'"
-        ) from exc
-    except ValidationError as exc:
-        path = ".".join(str(item) for item in exc.absolute_path)
-        location = f" at '{path}'" if path else ""
-
-        raise ValueError(
-            f"Invalid arguments for '{call.name}'{location}: {exc.message}"
-        ) from exc
-
-    return tool
-
-
-async def dispatch_tool_call(
-    call: ParsedCall,
-    tool_registry: dict[str, Tool],
-    client: Optional[Client]
-) -> SandboxIntermediateResult:
-    tool = validate_tool_call(call, tool_registry)
-
-    if tool is None:
-        answer = (
-            call.positional_arguments[0]
-            if call.positional_arguments
-            else call.keyword_arguments["answer"]
-        )
-        return SandboxIntermediateResult(
-            success=True,
-            tool_name="final_answer",
-            sandbox_output=answer
-        )
-
-    if not client:
-        raise ValueError("There is no active MCP client")
-
-    try:
-        result = await client.call_tool(
-            call.name,
-            call.keyword_arguments
-        )
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except Exception as exc:
-        return SandboxIntermediateResult(
-            success=False,
-            tool_name=call.name,
-            sandbox_output=f"MCP tool failed: {exc}"
-        )
-
-    return SandboxIntermediateResult(
-        success=True,
-        tool_name=call.name,
-        sandbox_output=str(result)
-    )
 
 
 def get_python_type(prop: Any) -> str:
@@ -260,54 +84,18 @@ def schema_to_signature(tool: Tool, python_name: Optional[str] = None) -> str:
         result += f" [MCP name: {tool.name}]"
 
     if tool.description:
-        # result += f": {tool.description}"
         result += f"\n  Description: {tool.description}"
 
-    # # Include the actual JSON Schema for exact constraints.
-    # result += (
-    #     "\n  Input schema: "
-    #     + json.dumps(schema, ensure_ascii=False)
-    # )
-
     return result
-
-    # return f"- {tool.name}({', '.join(params)}): {tool.description or ''})"
 
 
 def manual(
     tools: Optional[list[Tool]],
-    aliases: Optional[dict[str, str]] = None,
-    # resources: Optional[list[Any]] = None,
-    # prompts: Optional[list[Any]] = None,
-    # resource_templates: Optional[list[Any]] = None,
-    # discovery_errors: Optional[dict[str, str]] = None
+    aliases: Optional[dict[str, str]] = None
 ) -> str:
     """Generate the dynamic manual the LLM receives in the system prompt."""
 
     lines = [
-        # #  # Propose start
-        # "Sandbox execution manual",
-        # "",
-        # "Write Python code in one code block per agent step.",
-        # "MCP tools are available as Python functions.",
-        # "Use keyword arguments for MCP tool calls.",
-        # "MCP results can be strings, dictionaries, or lists.",
-        # "Use final_answer(answer_string) to finish.",
-        # "",
-        # "Built-in function:",
-        # "- final_answer(answer: str)",
-        # # "- validate_edited_python(source: str, filename: str)",
-        # "",
-        # "MCP helper functions:",
-        # "- mcp_call_tool(name: str, **kwargs)",
-        # "- mcp_list_resources()",
-        # "- mcp_list_resource_templates()",
-        # "- mcp_read_resource(uri: str)",
-        # "- mcp_list_prompts()",
-        # "- mcp_get_prompt(name: str, arguments: dict | None = None)",
-        # "",
-        # "Available MCP tools:"
-        # #  # Propose end
         "Sandbox execution manual:",
         "- Write exactly one Python code block per step.",
         "- Tool calls are ordinary Python function calls.",
@@ -317,8 +105,6 @@ def manual(
         "Available tools:",
         "- final_answer(answer: str)" +
         "\n  Description: terminate the agent loop and return the solution."
-        # "- show_tools(): show available tool names",
-        # "- print(text: str): print a result"
     ]
 
     registry = {tool.name: tool for tool in (tools or [])}
@@ -330,41 +116,6 @@ def manual(
                     registry[original_name], python_name
                 )
             )
-    # else:
-    #     lines.append("(No MCP tools available)")
-
-    # lines.append("\nAvailable MCP resources:")
-
-    # for resource in resources or []:
-    #     lines.append(
-    #         f"- {resource.uri}: "
-    #         f"{resource.description or ''}"
-    #     )
-
-    # lines.append("\nAvailable resource templates:")
-
-    # for template in resource_templates or []:
-    #     lines.append(
-    #         f"- {template.uri_template}: "
-    #         f"{template.description or ''}"
-    #     )
-
-    # lines.append("\nAvailable MCP prompts:")
-
-    # for prompt in prompts or []:
-    #     args = [
-    #         f"{arg.name}{' (required)' if arg.required else ''}"
-    #         for arg in (prompt.arguments or [])
-    #     ]
-    #     lines.append(
-    #         f"- {prompt.name}({', '.join(args)}): "
-    #         f"{prompt.description or ''}"
-    #     )
-
-    # if discovery_errors:
-    #     lines.append("\nMCP discovery warnings:")
-    #     for capability, error in discovery_errors.items():
-    #         lines.append(f"- {capability}: {error}")
 
     return "\n".join(lines)
 
@@ -387,12 +138,6 @@ def build_mcp_aliases(
 
     reserved = set(dir(builtins)) | {
         "final_answer",
-        # "mcp_call_tool",
-        # "mcp_read_resource",
-        # "mcp_get_prompt",
-        # "mcp_list_resources",
-        # "mcp_list_resource_templates",
-        # "mcp_list_prompts",
         "validate_edited_python"
     }
 
@@ -510,10 +255,6 @@ class Sandbox:
         self.client: Optional[Client] = None
         self.tool_registry: dict[str, Tool] = {}
         self.tool_aliases: dict[str, str] = {}
-        # self.resources: list[Any] = []
-        # self.resource_templates: list[Any] = []
-        # self.prompts: list[Any] = []
-        # self.discovery_errors: dict[str, str] = {}
         self._stack = AsyncExitStack()
         self._worker: Optional[asyncio.subprocess.Process] = None
 
@@ -557,10 +298,10 @@ class Sandbox:
                     method = getattr(active_client, method_name)
                     items = await method()
                     setattr(self, attribute, items)
-                except Exception as exc:
-                    self.discovery_errors[attribute] = (
-                        f"{type(exc).__name__}: {exc}"
-                    )
+                except Exception:
+                    # self.discovery_errors[attribute] = (
+                    #     f"{type(exc).__name__}: {exc}"
+                    # )
                     setattr(self, attribute, [])
 
         return self
@@ -581,15 +322,10 @@ class Sandbox:
             raise RuntimeError("Sandbox configuration is not loaded")
 
         for directory in self.config.allowed_directories:
-            path = Path(directory)
+            if Path(directory).is_dir():
+                return directory
 
-            if path.is_dir():
-                return str(path)
-
-        # raise RuntimeError("No allowed execution directory exists")
-        path = Path("/tmp/agent")
-        os.mkdir(path)
-        return str(path)
+        raise RuntimeError("No allowed execution directory exists")
 
     async def _start_worker(self) -> None:
         """Start the worker if it is not already running."""
@@ -675,90 +411,11 @@ class Sandbox:
         if process.stdin is not None:
             process.stdin.close()
 
-    def _allowed_path(self, path: str | os.PathLike[str]) -> Path:
-        if self.config is None:
-            raise RuntimeError("Sandbox configuration is not loaded")
-
-        candidate = Path(path).expanduser().resolve()
-
-        allowed = any(
-            candidate == directory or directory in candidate.parents
-            for configured in self.config.allowed_directories
-            if (directory := Path(configured).resolve()).is_dir()
-        )
-
-        if not allowed:
-            raise PermissionError(f"Access denied: {candidate}")
-
-        return candidate
-
-    def _safe_open(
-        self,
-        file: str | os.PathLike[str],
-        mode: str = "r",
-        *args: Any,
-        **kwargs: Any
-    ) -> Any:
-        path = self._allowed_path(file)
-
-        if any(flag in mode for flag in ("w", "a", "x", "+")):
-            if not any(path == Path(directory).resolve()
-                       or Path(directory).resolve() in path.parents
-                       for directory in self.config.allowed_directories):
-                raise PermissionError(f"Write access denied: {path}")
-
-        return builtins.open(path, mode, *args, **kwargs)
-
-    def restricted_builtins(self) -> dict[str, Any]:
-        allowed_names = {
-            "abs",
-            "all",
-            "any",
-            "bool",
-            "dict",
-            "enumerate",
-            "filter",
-            "float",
-            "int",
-            "len",
-            "list",
-            "map",
-            "max",
-            "min",
-            "print",
-            "range",
-            "reversed",
-            "round",
-            "set",
-            "sorted",
-            "str",
-            "sum",
-            "tuple",
-            "zip",
-            "Exception",
-            "ValueError",
-            "TypeError",
-            "RuntimeError"
-        }
-
-        restricted = {
-            name: getattr(builtins, name)
-            for name in allowed_names
-        }
-
-        restricted["open"] = self._safe_open
-
-        return restricted
-
     def show_manual(self) -> None:
         print(
             manual(
                 tools=list(self.tool_registry.values()),
-                aliases=self.tool_aliases,
-                # resources=self.resources,
-                # prompts=self.prompts,
-                # resource_templates=self.resource_templates,
-                # discovery_errors=self.discovery_errors
+                aliases=self.tool_aliases
             )
         )
         sys.stdout.flush()
@@ -766,13 +423,6 @@ class Sandbox:
     def show_tools(self) -> list[str]:
         return [
             "final_answer",
-            # "mcp_call_tool",
-            # "mcp_read_resource",
-            # "mcp_get_prompt",
-            # "mcp_list_resources",
-            # "mcp_list_resource_templates",
-            # "mcp_list_prompts",
-            # "validate_edited_python",
             *self.tool_aliases.keys()
         ]
 
@@ -807,26 +457,6 @@ class Sandbox:
                 self.check_imports([node.module or ""])
             elif isinstance(node, (ast.Global, ast.Nonlocal)):
                 raise ValueError("Global declarations are not allowed")
-
-    async def invoke_mcp_tool(
-        self,
-        name: str,
-        arguments: dict[str, Any]
-    ) -> Any:
-        call = ParsedCall(
-            name=name,
-            positional_arguments=(),
-            keyword_arguments=arguments
-        )
-        tool = validate_tool_call(call, self.tool_registry)
-
-        if tool is None:
-            raise ValueError("final_answer is not an MCP tool")
-
-        if self.client is None:
-            raise RuntimeError("No active MCP client")
-
-        return await self.client.call_tool(name, arguments)
 
     async def _handle_mcp_request(
         self,
@@ -897,20 +527,20 @@ class Sandbox:
                 value = [as_dict(item) for item in items]
 
             elif operation == "list_resource_templates":
-                items = await self.client.list_resource_templates()
-                value = [as_dict(item) for item in items]
+                templates = await self.client.list_resource_templates()
+                value = [as_dict(item) for item in templates]
 
             elif operation == "read_resource":
                 uri = request["uri"]
                 if not isinstance(uri, str):
                     raise ValueError("Resource URI must be a string")
 
-                items = await self.client.read_resource(uri)
-                value = [as_dict(item) for item in items]
+                contents = await self.client.read_resource(uri)
+                value = [as_dict(item) for item in contents]
 
             elif operation == "list_prompts":
-                items = await self.client.list_prompts()
-                value = [as_dict(item) for item in items]
+                prompts = await self.client.list_prompts()
+                value = [as_dict(item) for item in prompts]
 
             elif operation == "get_prompt":
                 name = request["name"]
@@ -927,10 +557,10 @@ class Sandbox:
                         "Prompt arguments must be a dict[str, str]"
                     )
 
-                result = await self.client.get_prompt(
+                prompt_result = await self.client.get_prompt(
                     name, arguments
                 )
-                value = as_dict(result)
+                value = as_dict(prompt_result)
 
             else:
                 raise ValueError(
@@ -1010,6 +640,9 @@ class Sandbox:
         tool_truncated = False
 
         def append_output(value: str) -> None:
+            if self.config is None:
+                raise RuntimeError("Sandbox configuration is not loaded")
+
             nonlocal byte_count, char_count, truncated
 
             remaining_bytes = max(
@@ -1065,8 +698,8 @@ class Sandbox:
                             "".join(pieces) +
                             "\nWorker exited unexpectedly."
                         ),
-                        partial=True,
-                        truncated=truncated
+                        # partial=True,
+                        truncated=(truncated or tool_truncated)
                     )
 
                 message = json.loads(raw)
@@ -1110,7 +743,9 @@ class Sandbox:
                 if kind == "result":
                     status = message["status"]
 
-                    if status == "final_answer":
+                    if status == "memory_limit":
+                        await self._stop_worker()
+                    elif status == "final_answer":
                         answer = message["answer"]
                         return SandboxIntermediateResult(
                             success=True,
@@ -1149,9 +784,6 @@ class Sandbox:
                         truncated=was_truncated
                     )
 
-                if kind == "memory_limit":
-                    await self._stop_worker()
-
                 raise RuntimeError(f"Unexpected worker message: {kind}")
 
         except asyncio.TimeoutError:
@@ -1161,8 +793,8 @@ class Sandbox:
                 success=False,
                 tool_name="python",
                 status="timeout",
-                partial=True,
-                truncated=truncated,
+                # partial=True,
+                truncated=(truncated or tool_truncated),
                 sandbox_output=(
                     f"Execution timed out after "
                     f"{self.config.max_execution_time_seconds} seconds.\n"
@@ -1171,6 +803,10 @@ class Sandbox:
                     + (
                         "\n[Sandbox: Output truncated due to size limits.]"
                         if truncated else ""
+                    )
+                    + (
+                        "\n[Sandbox: MCP tool output was truncated.]"
+                        if tool_truncated else ""
                     )
                 )
             )
@@ -1232,50 +868,6 @@ class Sandbox:
 
         return result
 
-    # #  With end_marker only
-    # async def read_command(self) -> tuple[Optional[str], bool]:
-    #     """Read one command terminated by <<<END_COMMAND>>>.
-
-    #     Returns (command, complete).
-    #     """
-
-    #     lines: list[str] = []
-    #     terminal_mode = sys.stdin.isatty()
-
-    #     while True:
-    #         if terminal_mode:
-    #             prompt = "sandbox> " if not lines else "... "
-    #             print(prompt, end="")
-    #             sys.stdout.flush()
-
-    #         line = await asyncio.to_thread(sys.stdin.readline)
-
-    #         if not line:
-    #             # EOF
-    #             if not lines:
-    #                 return None, True
-    #             return "".join(lines), False
-
-    #         text = line.rstrip("\r\n")
-
-    #         if not lines and text.strip() in EXIT_COMMANDS:
-    #             return text.strip(), True
-
-    #         if COMMAND_END_MARKER in text:
-    #             before_marker = text.split(COMMAND_END_MARKER, 1)[0]
-    #             lines.append(before_marker)
-
-    #             command = "".join(lines).strip()
-
-    #             # Convert literal \n sequences into actual newlines
-    #             if "\\n" in command and "\n" not in command:
-    #                 command = command.replace("\\n", "\n")
-
-    #             return command, True
-
-    #         lines.append(line)
-
-    # without end_marker
     async def read_command(self) -> Optional[str]:
         lines: list[str] = []
         terminal_mode = sys.stdin.isatty()
@@ -1286,7 +878,7 @@ class Sandbox:
                 print(prompt, end="")
                 sys.stdout.flush()
 
-            line = await asyncio.to_thread(sys.stdin.readline)
+            line: str = await asyncio.to_thread(sys.stdin.readline)
 
             if not line:
                 # EOF
@@ -1305,10 +897,6 @@ class Sandbox:
 
                 command = "".join(lines).strip()
 
-                # Convert literal \n sequences into actual newlines
-                if "\\n" in command and "\n" not in command:
-                    command = command.replace("\\n", "\n")
-
                 return command
 
             lines.append(line)
@@ -1320,7 +908,6 @@ class Sandbox:
         Each command ends with <<<END_COMMAND>>>.
         """
 
-         #  With ctrl+D as end of a command
         terminal_mode = sys.stdin.isatty()
         if terminal_mode:
             self.show_manual()
@@ -1370,86 +957,6 @@ class Sandbox:
             print(result.model_dump_json())
             sys.stdout.flush()
 
-        # terminal_mode = sys.stdin.isatty()
-
-        # if terminal_mode:
-        #     self.show_manual()
-
-        # while True:
-        #     data, complete = await self.read_command()
-
-        #     # Clean EOF.
-        #     if data is None:
-        #         # TODO: some quit function
-        #         return
-
-        #     # EOF before the expected delimiter.
-        #     if not complete:
-        #         # TODO: some quit function
-        #         result = SandboxIntermediateResult(
-        #             success=False,
-        #             tool_name="sandbox",
-        #             status="incomplete_input",
-        #             sandbox_output=(
-        #                 "Input ended before "
-        #                 f"{COMMAND_END_MARKER}. "
-        #                 "The partial command was not executed."
-        #             )
-        #         )
-        #         print(result.model_dump_json())
-        #         sys.stdout.flush()
-        #         return
-
-        #     if data.strip() in EXIT_COMMANDS:
-        #         # TODO: some quit function
-        #         return
-
-        #     if not data.strip() and terminal_mode:
-        #         continue
-
-        #     try:
-        #         if terminal_mode and data.strip() in (
-        #             "manual", "manual()"
-        #         ):
-        #             result = SandboxIntermediateResult(
-        #                 success=True,
-        #                 tool_name="manual",
-        #                 sandbox_output=self.get_manual()
-        #             )
-
-        #         elif terminal_mode and data.strip() in (
-        #             "show_tools", "show_tools()"
-        #         ):
-        #             result = SandboxIntermediateResult(
-        #                 success=True,
-        #                 tool_name="show_tools",
-        #                 sandbox_output=self.show_tools()
-        #             )
-
-        #         elif terminal_mode and "```" not in data:
-        #             # Terminal REPL supports raw Python.
-        #             result = await self.run_python(data)
-
-        #         else:
-        #             # Complete LLM response.
-        #             # Used by the Agent and for fenced terminal input.
-        #             result = await self.execute_llm_response(data)
-
-        #     except (KeyboardInterrupt, SystemExit):
-        #         raise
-        #     except Exception as exc:
-        #         result = SandboxIntermediateResult(
-        #             success=False,
-        #             tool_name="sandbox",
-        #             status="error",
-        #             sandbox_output=(
-        #                 f"{type(exc).__name__}: {exc}"
-        #             )
-        #         )
-
-        #     print(result.model_dump_json())
-        #     sys.stdout.flush()
-
 
 async def sandbox_main(
     template_path: Optional[Path] = None,
@@ -1480,7 +987,9 @@ def main(
     """
     Sandbox CLI - for Agent Smith.
 
-    Write command and press Ctrl+D
+    Enter Python code or a fenced LLM response.
+    Terminate each command with <<<END_COMMAND>>> or Ctrl+D.
+    Use exit or Ctrl+D to quit.
     """
 
     if mcp_stdio and mcp_server:
