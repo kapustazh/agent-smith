@@ -11,6 +11,8 @@ import os
 import platform
 import resource
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 
 class _Ruleset(ctypes.Structure):
@@ -205,12 +207,23 @@ def restricted_builtins(rules: list[str], directories: list[str]) -> dict:
     original_open = builtins.open
     roots = [Path(p).resolve() for p in directories if Path(p).is_dir()]
 
-    def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    def safe_import(
+        name: str,
+        globals: dict[str, Any] | None = None,
+        locals: dict[str, Any] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0
+    ) -> ModuleType:
         if level != 0 or not permitted_import(name, rules):
             raise ImportError(f"Import not authorized: {name}")
         return original_import(name, globals, locals, fromlist, level)
 
-    def safe_open(file, mode="r", *args, **kwargs):
+    def safe_open(
+        file: str | os.PathLike[str] | int,
+        mode: str = "r",
+        *args: Any,
+        **kwargs: Any
+    ) -> Any:
         if isinstance(file, int):
             raise PermissionError(
                 "Opening arbitrary file descriptors is prohibited"

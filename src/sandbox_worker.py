@@ -7,6 +7,7 @@ import sys
 import traceback
 import importlib.util
 from pathlib import Path
+from typing import Any, Callable
 
 
 _security_file = Path(__file__).resolve().with_name("sandbox_security.py")
@@ -104,11 +105,12 @@ def final_answer(answer: str) -> None:
 
 def send(message: dict) -> None:
     """Send a JSON message to the parent process."""
+    assert sys.__stdout__ is not None
     sys.__stdout__.write(json.dumps(message, ensure_ascii=False) + "\n")
     sys.__stdout__.flush()
 
 
-def mcp_rpc(operation: str, **arguments):
+def mcp_rpc(operation: str, **arguments: Any) -> Any:
     """Synchronously request an MCP operation from the parent."""
     global _rpc_counter
     _rpc_counter += 1
@@ -150,7 +152,7 @@ def create_mcp_namespace(
 ) -> dict:
     """Build Python-callable MCP wrappers inside the worker."""
 
-    def mcp_call_tool(name: str, **kwargs):
+    def mcp_call_tool(name: str, **kwargs: Any) -> Any:
         return mcp_rpc(
             "call_tool", name=name, arguments=kwargs
         )
@@ -186,8 +188,8 @@ def create_mcp_namespace(
         # "mcp_list_prompts": mcp_list_prompts
     }
 
-    def create_tool_wrapper(original_name: str):
-        def wrapper(**kwargs):
+    def create_tool_wrapper(original_name: str) -> Callable:
+        def wrapper(**kwargs: Any) -> Any:
             return mcp_call_tool(original_name, **kwargs)
         return wrapper
 
@@ -237,7 +239,9 @@ def execute(code: str, namespace: dict) -> None:
         exit_code = getattr(exc, "code", None)
         if not isinstance(exit_code, (str, int, type(None))):
             exit_code = str(exit_code)
-        send({"type": "control", "name": type(exc).__name__, "code": exit_code})
+        send(
+            {"type": "control", "name": type(exc).__name__, "code": exit_code}
+        )
     except MemoryError:
         send({"type": "result", "status": "memory_limit",
               "error": "Sandbox memory limit exceeded. Worker terminated."})

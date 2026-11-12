@@ -95,7 +95,7 @@ class SandboxIntermediateResult(BaseModel):
     recovery_details: Optional[str] = None
 
     @model_validator(mode="after")
-    def default_status(self):
+    def default_status(self) -> "SandboxIntermediateResult":
         if self.status is None:
             self.status = "success" if self.success else "error"
         return self
