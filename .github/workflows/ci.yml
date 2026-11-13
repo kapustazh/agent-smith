@@ -27,14 +27,18 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           version: "0.13.5"
           python-version: "3.11"
       # Do not execute PR-supplied build commands with the write token.
-      - name: Format tracked Python files
+      - name: Format Python files changed by this PR
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          git ls-files -z -- '*.py' | xargs -0 uv --no-config tool run \
+          git diff --name-only -z --diff-filter=ACMR "$PR_BASE_SHA" -- '*.py' | \
+            xargs -0 -r uv --no-config tool run \
             --from autopep8==2.3.2 autopep8 --ignore-local-config \
             --global-config /dev/null --max-line-length 79 --in-place
       - name: Commit formatting fixes

@@ -1,5 +1,7 @@
 # MBPP sandbox execution contract (version 1)
 
+See the [MCP run guide](usage.md) for setup and examples.
+
 The agent sandbox and MBPP executor share `SandboxConfig` from
 `src/config_model.py`. The MCP server delegates candidate execution to
 `execute_mbpp(MBPPExecutionRequest)` in `src/mbpp_executor.py`. The result model is
