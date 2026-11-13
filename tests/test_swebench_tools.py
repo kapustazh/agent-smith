@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 from threading import Event, Timer
+from typing import Any
 import unittest
 from unittest.mock import patch
 from anyio import move_on_after
@@ -290,7 +291,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_repository_work_finishes_before_unlock(
         self,
     ) -> None:
-        owner = SWEBenchMCP(self.root, SandboxConfig(), None)
+        owner = SWEBenchMCP(self.root, SandboxConfig())
         release = Event()
         timer = Timer(0.3, release.set)
         timer.start()
@@ -311,16 +312,28 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 "read_file", "edit_file", "list_files", "search_code",
                 "search_function_or_class_definition_in_code",
                 "find_references",
-                "run_command", "run_tests", "get_patch",
+                "run_command", "run_tests", "get_patch", "start_task",
             })
+            self.assertEqual(
+                set(tools["run_command"].input_schema["required"]),
+                {"command"},
+            )
+            self.assertEqual(
+                set(tools["start_task"].input_schema["required"]),
+                {"docker_image", "eval_script"},
+            )
             self.assertEqual(len(await client.list_resources()), 1)
             self.assertEqual(len(await client.list_prompts()), 1)
-            for operation, execution_args in (
-                ("run_command", {"command": "true"}),
-                ("run_tests", {}), ("get_patch", {}),
-            ):
-                with self.assertRaisesRegex(ToolError, "--task-file"):
-                    await client.call_tool(operation, execution_args)
+            response = await client.call_tool(
+                "run_command", {"command": "echo host-ok"},
+            )
+            content = response.content[0]
+            assert isinstance(content, TextContent)
+            self.assertIn("host-ok", content.text)
+            with self.assertRaisesRegex(ToolError, "start_task"):
+                await client.call_tool("run_tests", {})
+            with self.assertRaisesRegex(ToolError, "Patch unavailable"):
+                await client.call_tool("get_patch", {})
             schema = tools["find_references"].input_schema
             self.assertEqual(set(schema["required"]),
                              {"name", "filepath", "line"})
@@ -390,3 +403,146 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             except subprocess.TimeoutExpired:
                 process.kill()
                 await asyncio.to_thread(process.wait)
+
+    async def test_host_patch_diffs_against_head(self) -> None:
+        for args in (
+            ["git", "init", "-q"],
+            ["git", "config", "user.email", "fixture@example.test"],
+            ["git", "config", "user.name", "fixture"],
+        ):
+            subprocess.run(args, cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "add", "module.py"], cwd=self.root, check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-qm", "baseline"], cwd=self.root, check=True,
+        )
+        (self.root / "module.py").write_text(
+            SOURCE.replace("value + 1", "value + 2"),
+        )
+        (self.root / "extra.py").write_text("VALUE = 1\n")
+        owner = SWEBenchMCP(self.root, SandboxConfig())
+        patch = await owner.get_patch()
+        self.assertIn("-    return value + 1", patch)
+        self.assertIn("+    return value + 2", patch)
+        self.assertIn("diff --git a/extra.py b/extra.py", patch)
+        self.assertNotIn("old mode", patch)
+
+    async def test_start_task_replaces_and_cleans_up(self) -> None:
+        owner = SWEBenchMCP(self.root, SandboxConfig())
+        created: list[Any] = []
+
+        class FakeSession:
+            def __init__(
+                self, docker_image: str, eval_script: str,
+                config: SandboxConfig,
+            ) -> None:
+                self.docker_image = docker_image
+                self.eval_script = eval_script
+                self.workdir = "/testbed"
+                self.repository = RepositoryTools(
+                    owner.fallback_root, config, Path("/testbed"),
+                )
+                self.closed = False
+                self.fail = False
+                created.append(self)
+
+            async def start(self) -> None:
+                if self.fail:
+                    raise ToolError("Cannot use Docker image")
+
+            async def close(self) -> None:
+                self.closed = True
+
+            async def run_command(
+                self, command: str, workdir: str = "/testbed",
+            ) -> str:
+                return command
+
+        with patch("mcp_tools_swebench.DockerSession", FakeSession):
+            await owner.start_task("img:latest", "echo ok")
+            await owner.start_task("other:latest", "echo ok")
+        self.assertTrue(created[0].closed)
+        self.assertFalse(created[1].closed)
+        self.assertIs(owner.session, created[1])
+
+        def fail_once(
+            docker_image: str, eval_script: str, config: SandboxConfig,
+        ) -> Any:
+            session = FakeSession(docker_image, eval_script, config)
+            session.fail = True
+            return session
+
+        with patch("mcp_tools_swebench.DockerSession", fail_once):
+            with self.assertRaises(ToolError):
+                await owner.start_task("missing", "echo ok")
+        self.assertTrue(created[1].closed)
+        self.assertTrue(created[-1].closed)
+        self.assertIsNone(owner.session)
+        self.assertIn("module.py", await owner.call_repository(
+            "list_files", ".", "*.py",
+        ))
+
+    async def test_start_task_waits_for_the_current_command(self) -> None:
+        owner = SWEBenchMCP(self.root, SandboxConfig())
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class WaitingSession:
+            def __init__(
+                self, docker_image: str, eval_script: str,
+                config: SandboxConfig,
+            ) -> None:
+                self.docker_image = docker_image
+                self.eval_script = eval_script
+                self.workdir = "/testbed"
+                self.repository = RepositoryTools(
+                    owner.fallback_root, config, Path("/testbed"),
+                )
+                self.closed = False
+
+            async def start(self) -> None:
+                return None
+
+            async def close(self) -> None:
+                self.closed = True
+
+            async def run_command(
+                self, command: str, workdir: str = "/testbed",
+            ) -> str:
+                entered.set()
+                await release.wait()
+                return "done"
+
+        with patch("mcp_tools_swebench.DockerSession", WaitingSession):
+            await owner.start_task("img:latest", "echo ok")
+            running = asyncio.create_task(owner.run_command("echo"))
+            await entered.wait()
+            swap = asyncio.create_task(
+                owner.start_task("other:latest", "echo ok"),
+            )
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(swap), 0.05)
+            release.set()
+            self.assertEqual(await running, "done")
+            await swap
+        self.assertIsNotNone(owner.session)
+        assert owner.session is not None
+        self.assertEqual(owner.session.docker_image, "other:latest")
+
+
+class ManualTests(unittest.TestCase):
+    def test_server_does_not_take_a_task_file(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "mcp_tools_swebench.py"),
+             "--help"],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("--task-file", result.stdout)
+        rejected = subprocess.run(
+            [sys.executable, str(ROOT / "mcp_tools_swebench.py"),
+             "--task-file", "cache/swebench_task.json"],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)

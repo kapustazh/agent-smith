@@ -1,5 +1,7 @@
 import asyncio
 import codecs
+import os
+import signal
 from typing import Any
 
 from anyio import CancelScope
@@ -14,9 +16,17 @@ class ProcessResult(BaseModel):
     truncated: bool = False
 
 
+def kill_process_group(process: asyncio.subprocess.Process) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 async def start_process(
     *arguments: str, **options: Any,
 ) -> asyncio.subprocess.Process:
+    options["start_new_session"] = True
     creation = asyncio.create_task(asyncio.create_subprocess_exec(
         *arguments, **options))
     try:
@@ -26,8 +36,7 @@ async def start_process(
     except asyncio.CancelledError:
         with CancelScope(shield=True):
             process = await creation
-            if process.returncode is None:
-                process.kill()
+            kill_process_group(process)
             await process.communicate()
         raise
 
@@ -79,8 +88,8 @@ class ProcessCapture:
             self.result.timed_out = True
         finally:
             with CancelScope(shield=True):
+                kill_process_group(process)
                 if process.returncode is None:
-                    process.kill()
                     await process.wait()
                 for task in tasks:
                     task.cancel()
@@ -115,9 +124,14 @@ class ProcessCapture:
 
 async def capture(
     arguments: list[str], timeout: float, limit: int, data: bytes = b"",
+    cwd: str | None = None,
 ) -> ProcessResult:
-    process = await start_process(
-        *arguments, stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
+    options: dict[str, Any] = {
+        "stdin": asyncio.subprocess.PIPE,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+    }
+    if cwd is not None:
+        options["cwd"] = cwd
+    process = await start_process(*arguments, **options)
     return await ProcessCapture(process, limit).run(timeout, data)
