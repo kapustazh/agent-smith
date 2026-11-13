@@ -7,6 +7,10 @@ Building an agentic framework capable of autonomously solving coding challenges 
 
 Autonomous reasoning, code generation, and execution.
 
+## Documentation
+
+See the [MCP run guide](docs/usage.md) and [architecture](docs/architecture.md).
+
 ## Description
 
 ### System architecture
