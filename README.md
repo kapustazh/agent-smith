@@ -145,16 +145,20 @@ checks without Docker.
 
 ### SWE-bench tools
 
-Set `TESTBED_PATH` to the repository to inspect. Start the server:
+Set `TESTBED_PATH` to the repository to inspect and start the server with
+no arguments:
 
 ```bash
 TESTBED_PATH=/absolute/path/to/repo uv run python mcp_tools_swebench.py
 ```
 
-All nine tools are published. `TESTBED_PATH` enables repository operations;
-execution tools require a task file. Pull the task's `docker_image`, then use
-`uv run python mcp_tools_swebench.py --task-file cache/swebench_task.json`.
-Docker uses a private `/testbed` copy, shared config limits and no network.
+File tools, `run_command`, and `get_patch` use that checkout.
+`run_tests` needs a container. Read the task JSON and call
+`start_task(docker_image, eval_script)` through the MCP client using those
+two fields. Pull the image before calling `start_task`.
+
+Docker keeps a private `/testbed` copy, shared config limits, and no network.
+See [the SWE-bench server notes](docs/swebench-server.md).
 Test runs preserve installed dependencies in a temporary container image,
 then remove that image and the evaluation workspace.
 `run_tests` returns script logs/exit code, not a benchmark verdict.

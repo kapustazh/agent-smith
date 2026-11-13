@@ -1,20 +1,27 @@
 import asyncio
 from pathlib import Path
+import shlex
 import tempfile
 from uuid import uuid4
 
 from anyio import CancelScope
 from fastmcp.exceptions import ToolError
 
-from src.config_model import SandboxConfig, SWEBenchTaskInput
+from src.config_model import SandboxConfig
 from src.docker_process import ProcessResult, capture
 from src.swebench_tools import RepositoryTools
 
 
 class DockerSession:
-    def __init__(self, task: SWEBenchTaskInput, config: SandboxConfig) -> None:
-        self.task = task
+    def __init__(
+        self, docker_image: str, eval_script: str, config: SandboxConfig,
+    ) -> None:
+        self.docker_image = docker_image
+        self.eval_script = eval_script
         self.config = config
+        # SWE-bench images keep the repository here. TESTBED_PATH is the
+        # host checkout used when no container is running.
+        self.workdir = "/testbed"
         self.directory = tempfile.TemporaryDirectory(prefix="smith-swe-")
         self.root = Path(self.directory.name).resolve() / "repo"
         self.root.mkdir()
@@ -23,7 +30,9 @@ class DockerSession:
         self.container = ""
         self.base = ""
         self.lock = asyncio.Lock()
-        self.repository = RepositoryTools(self.root, config, Path("/testbed"))
+        self.repository = RepositoryTools(
+            self.root, config, Path(self.workdir),
+        )
 
     async def _control(self, *arguments: str, check: bool = True) -> str:
         try:
@@ -50,17 +59,19 @@ class DockerSession:
             "create", "--name", name, "--network", "none",
             "--memory", f"{self.config.max_memory_mb}m",
             "--memory-swap", f"{self.config.max_memory_mb}m",
-            "--pids-limit", "128", "--cap-drop", "ALL",
+            "--pids-limit", "128",
+            "--cap-drop", "ALL",
             "--cap-add", "DAC_OVERRIDE", "--security-opt",
             "no-new-privileges", "--entrypoint", "/bin/sh",
-            "--workdir", "/testbed",
+            "--workdir", self.workdir,
         ]
         if workspace is not None:
             arguments.extend([
-                "--mount", f"type=bind,src={workspace},dst=/testbed",
+                "--mount",
+                f"type=bind,src={workspace},dst={self.workdir}",
             ])
         arguments.extend([
-            "--", image or self.task.docker_image, "-c",
+            "--", image or self.docker_image, "-c",
             "while :; do sleep 3600; done",
         ])
         try:
@@ -72,28 +83,31 @@ class DockerSession:
         return name
 
     async def start(self) -> None:
-        if not self.task.docker_image.strip():
+        if not self.docker_image.strip():
             raise self.repository._error(
                 "Task docker_image must not be empty.")
         try:
             await self._control(
-                "image", "inspect", "--", self.task.docker_image,
+                "image", "inspect", "--", self.docker_image,
             )
         except ToolError as error:
             raise self.repository._error(
-                f"Cannot use Docker image {self.task.docker_image}. "
+                f"Cannot use Docker image {self.docker_image}. "
                 "Start Docker and pull the task image before launching. "
                 f"{error}",
             ) from None
         seed = await self._create(None)
         try:
-            await self._control("cp", f"{seed}:/testbed/.", str(self.root))
+            await self._control(
+                "cp", f"{seed}:{self.workdir}/.", str(self.root),
+            )
         finally:
             await self._remove(seed)
         self.container = await self._create(self.root)
         await self._control("start", self.container)
         self.base = await self._control(
-            "exec", self.container, "git", "-c", "safe.directory=/testbed",
+            "exec", self.container, "git", "-c",
+            f"safe.directory={self.workdir}",
             "rev-parse", "--verify", "HEAD",
         )
         if len(self.base) not in (40, 64) or any(
@@ -104,8 +118,10 @@ class DockerSession:
 
     async def _execute(
         self, container: str, arguments: list[str], data: bytes = b"",
-        workdir: str = "/testbed",
+        workdir: str | None = None,
     ) -> ProcessResult:
+        if workdir is None:
+            workdir = self.workdir
         await self._control("start", container)
         try:
             result = await capture(
@@ -129,7 +145,8 @@ class DockerSession:
             await self._control("kill", name, check=False)
             await self._control("start", name, check=False)
             await self._control(
-                "exec", name, "find", "/testbed", "-mindepth", "1", "-delete",
+                "exec", name, "find", self.workdir,
+                "-mindepth", "1", "-delete",
                 check=False,
             )
         try:
@@ -157,15 +174,17 @@ class DockerSession:
         self.images.discard(image)
 
     async def run_command(
-        self, command: str, workdir: str = "/testbed",
+        self, command: str, workdir: str | None = None,
     ) -> str:
+        if workdir is None:
+            workdir = self.workdir
         if not command.strip() or "\x00" in command:
             raise self.repository._error(
                 "Supply a non-empty shell command without null bytes.")
         async with self.lock:
             relative = self.repository._relative(workdir)
             with self.repository._directory(relative):
-                directory = str(Path("/testbed") / relative)
+                directory = str(Path(self.workdir) / relative)
             result = await self._execute(
                 self.container, ["/bin/bash", "-c", command],
                 workdir=directory,
@@ -173,7 +192,7 @@ class DockerSession:
             return result.model_dump_json()
 
     async def run_tests(self) -> str:
-        if not self.task.eval_script.strip():
+        if not self.eval_script.strip():
             raise self.repository._error("Task eval_script must not be empty.")
         async with self.lock:
             image = "smith-swe-eval-" + uuid4().hex
@@ -189,14 +208,14 @@ class DockerSession:
         with tempfile.TemporaryDirectory(prefix="smith-swe-eval-") as folder:
             workspace = Path(folder).resolve()
             await self._control(
-                "cp", f"{self.container}:/testbed/.", str(workspace),
+                "cp", f"{self.container}:{self.workdir}/.", str(workspace),
             )
             name = ""
             try:
                 name = await self._create(workspace, image)
                 result = await self._execute(
                     name, ["/bin/bash", "-s"],
-                    self.task.eval_script.encode(),
+                    self.eval_script.encode(),
                 )
                 return result.model_dump_json()
             finally:
@@ -206,7 +225,11 @@ class DockerSession:
 
     async def get_patch(self) -> str:
         async with self.lock:
-            git = "git -c core.fileMode=false -c safe.directory=/testbed "
+            root = shlex.quote(self.workdir)
+            git = (
+                "git -c core.fileMode=false -c "
+                f"safe.directory={root} "
+            )
             script = (
                 "set -e\n"
                 "index=$(mktemp /tmp/smith-index.XXXXXX)\n"
