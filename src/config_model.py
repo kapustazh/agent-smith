@@ -72,24 +72,30 @@ class SandboxIntermediateResult(BaseModel):
     sandbox_output: str | list[str] = Field(
         description="Sandbox execution result (stdout/stderr/error message)")
 
-    status: Literal[
-        "success",
-        "error",
-        "timeout",
-        "truncated",
-        "syntax_error",
-        "no_code",
-        "recovered_code",
-        "final_answer",
-        "memory_limit"
-    ] | None = None
+    status: Optional[
+        Literal[
+            "success",
+            "error",
+            "timeout",
+            "truncated",
+            "syntax_error",
+            "no_code",
+            "recovered_code",
+            "final_answer",
+            "memory_limit",
+            "lint_error",
+            "incomplete_input"
+        ]
+    ] = None
 
-    partial: bool = False
+    # partial: bool = False
     truncated: bool = False
-    final_answer: str | None = None
+    final_answer: Optional[str] = None
+    code_recovered: bool = False
+    recovery_details: Optional[str] = None
 
     @model_validator(mode="after")
-    def default_status(self):
+    def default_status(self) -> "SandboxIntermediateResult":
         if self.status is None:
             self.status = "success" if self.success else "error"
         return self

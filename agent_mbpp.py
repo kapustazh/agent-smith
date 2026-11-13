@@ -353,10 +353,10 @@ def main(
                         messages.append(
                             cast(ChatCompletionMessageParam,
                                  {
-                                    "role": "tool",
-                                    "tool_call_id": call_id,
-                                    "content": ("Error: Tool (name="
-                                                f"{tool_name}) not found!")
+                                     "role": "tool",
+                                     "tool_call_id": call_id,
+                                     "content": ("Error: Tool (name="
+                                                 f"{tool_name}) not found!")
                                  }))
                         llm_finish = False
                         continue
@@ -375,9 +375,9 @@ def main(
                     messages.append(
                         cast(ChatCompletionMessageParam,
                              {
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "content": tool_result
+                                 "role": "tool",
+                                 "tool_call_id": call_id,
+                                 "content": tool_result
                              }))
                     # print("*********** message:", messages)
                     if tool_name == 'run_tests' and result_.success:
@@ -413,7 +413,7 @@ def main(
             sandbox_input=sandbox_input.strip(),
             sandbox_output=sandbox_output.strip(),
             retries=llm_retries
-            )
+        )
         steps.append(current_step)
         print("==== ", current_step)
 
