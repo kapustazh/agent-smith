@@ -1,4 +1,5 @@
 import asyncio
+import shlex
 import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,6 +11,7 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 from src.config_model import SandboxConfig
+from src.docker_process import capture
 from src.swebench_docker import DockerSession
 from src.swebench_tools import RepositoryTools
 
@@ -166,6 +168,54 @@ class SWEBenchMCP:
             with CancelScope(shield=True):
                 await asyncio.shield(self._shutdown())
 
+    def _host_cwd(self, workdir: str) -> str:
+        if workdir == "/testbed" or workdir.startswith("/testbed/"):
+            suffix = workdir.removeprefix("/testbed").lstrip("/")
+            workdir = suffix or "."
+        relative = self.repository._relative(workdir)
+        with self.repository._directory(relative):
+            return str(self.repository.root / relative)
+
+    async def _host_command(self, command: str, workdir: str) -> str:
+        if not command.strip() or "\x00" in command:
+            raise self.repository._error(
+                "Supply a non-empty shell command without null bytes.")
+        result = await capture(
+            ["/bin/bash", "-c", command],
+            self.config.max_execution_time_seconds,
+            self.config.max_output_chars,
+            cwd=self._host_cwd(workdir),
+        )
+        return result.model_dump_json()
+
+    async def _host_patch(self) -> str:
+        root = self.repository.root
+        quoted = shlex.quote(str(root))
+        git = f"git -c core.fileMode=false -c safe.directory={quoted} "
+        script = (
+            "set -e\n"
+            f"base=$({git}rev-parse --verify HEAD)\n"
+            "index=$(mktemp /tmp/smith-index.XXXXXX)\n"
+            "trap 'rm -f \"$index\" \"$index.lock\"' EXIT\n"
+            "export GIT_INDEX_FILE=$index\n"
+            f"{git}read-tree \"$base\"\n"
+            f"{git}add -A -- .\n"
+            f"{git}diff --cached --binary --no-ext-diff --no-textconv "
+            "\"$base\" --\n"
+        )
+        result = await capture(
+            ["/bin/bash", "-c", script],
+            self.config.max_execution_time_seconds,
+            self.config.max_output_chars,
+            cwd=str(root),
+        )
+        if result.exit_code != 0 or result.timed_out or result.truncated:
+            raise self.repository._error(
+                "Patch unavailable; check Git errors and trusted output "
+                "limits. " + result.stderr,
+            )
+        return result.stdout
+
     async def start_task(self, docker_image: str, eval_script: str) -> str:
         if not docker_image.strip() or "\x00" in docker_image:
             raise self.repository._error(
@@ -194,7 +244,7 @@ class SWEBenchMCP:
         async with self.lock:
             if self.session is not None:
                 return await self.session.run_command(command, workdir)
-            raise self.repository._error("No Docker task is started.")
+            return await self._host_command(command, workdir)
 
     async def run_tests(self) -> str:
         async with self.lock:
@@ -209,7 +259,7 @@ class SWEBenchMCP:
         async with self.lock:
             if self.session is not None:
                 return await self.session.get_patch()
-            raise self.repository._error("No Docker task is started.")
+            return await self._host_patch()
 
     def task_resource(self) -> dict[str, str]:
         if self.session is None:

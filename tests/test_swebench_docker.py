@@ -15,23 +15,18 @@ from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
 
 from mcp_tools_swebench import create_server
-from src.config_model import SandboxConfig, SWEBenchTaskInput
+from src.config_model import SandboxConfig
 from src.swebench_docker import DockerSession
 from src.docker_process import capture
 
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = os.environ.get("SWE_DOCKER_TEST_IMAGE", "")
-
-
-def task_input() -> SWEBenchTaskInput:
-    return SWEBenchTaskInput(
-        instance_id="fixture-1", problem_statement="Fix add.",
-        docker_image=IMAGE, eval_script=(
-            "cd /testbed\n"
-            "python -c 'from calc import add; assert add(2, 3) == 5'\n"
-            "echo evaluator-only > evaluation-artifact.txt\n"),
-    )
+EVAL_SCRIPT = (
+    "cd /testbed\n"
+    "python -c 'from calc import add; assert add(2, 3) == 5'\n"
+    "echo evaluator-only > evaluation-artifact.txt\n"
+)
 
 
 @unittest.skipUnless(IMAGE, "Run make test-docker for Docker checks.")
@@ -39,7 +34,7 @@ class DockerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.config = SandboxConfig(max_memory_mb=64,
                                     max_execution_time_seconds=2)
-        self.session = DockerSession(task_input(), self.config)
+        self.session = DockerSession(IMAGE, EVAL_SCRIPT, self.config)
         self.addAsyncCleanup(self.session.close)
         await self.session.start()
 
@@ -113,7 +108,7 @@ class DockerTests(unittest.IsolatedAsyncioTestCase):
             "printf 'VALUE = 7\\n' > "
             "/usr/local/lib/python3.10/site-packages/smith_dependency.py",
         )
-        self.session.task.eval_script = (
+        self.session.eval_script = (
             "python -c 'import smith_dependency; "
             "assert smith_dependency.VALUE == 7'\n"
             "echo evaluation-only > /testbed/evaluation-output\n"
@@ -152,7 +147,7 @@ class DockerTests(unittest.IsolatedAsyncioTestCase):
             "inspect", "--format", "{{.State.Running}}",
             self.session.container,
         ), "false")
-        self.session.task.eval_script = "sleep 30 & wait"
+        self.session.eval_script = "sleep 30 & wait"
         with move_on_after(0.3) as test_scope:
             await self.session.run_tests()
         self.assertTrue(test_scope.cancel_called)
@@ -180,8 +175,15 @@ class DockerTests(unittest.IsolatedAsyncioTestCase):
 class DockerMCPTests(unittest.IsolatedAsyncioTestCase):
     async def check_client(self, client: Client) -> None:
         async with client:
+            started = await client.call_tool("start_task", {
+                "docker_image": IMAGE, "eval_script": EVAL_SCRIPT,
+            })
+            started_text = started.content[0]
+            assert isinstance(started_text, TextContent)
+            self.assertIn(IMAGE, started_text.text)
             tools = await client.list_tools()
-            self.assertEqual(len(tools), 9)
+            self.assertEqual(len(tools), 10)
+            self.assertIn("start_task", {tool.name for tool in tools})
             self.assertTrue(all(tool.description for tool in tools))
             response = await client.call_tool("read_file", {
                 "filepath": "/testbed/calc.py", "start_line": 1, "end_line": 2,
@@ -200,18 +202,14 @@ class DockerMCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["exit_code"], 7)
 
     async def test_in_process_lifecycle(self) -> None:
-        await self.check_client(Client(create_server(task=task_input())))
+        await self.check_client(Client(create_server()))
 
     async def test_stdio_lifecycle(self) -> None:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as task:
-            task.write(task_input().model_dump_json())
-            task.flush()
-            await self.check_client(Client(StdioTransport(
-                command=sys.executable,
-                args=[str(ROOT / "mcp_tools_swebench.py"),
-                      "--task-file", task.name],
-                cwd=str(ROOT),
-            )))
+        await self.check_client(Client(StdioTransport(
+            command=sys.executable,
+            args=[str(ROOT / "mcp_tools_swebench.py")],
+            cwd=str(ROOT),
+        )))
 
     async def test_http_sigterm_cleans_up_container(self) -> None:
         before = await capture([
@@ -220,42 +218,39 @@ class DockerMCPTests(unittest.IsolatedAsyncioTestCase):
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as task:
-            task.write(task_input().model_dump_json())
-            task.flush()
-            process = await asyncio.create_subprocess_exec(
-                sys.executable, str(ROOT / "mcp_tools_swebench.py"),
-                "--task-file", task.name, "--transport", "http", "--port",
-                str(port), stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            try:
-                for _ in range(200):
-                    try:
-                        _, writer = await asyncio.open_connection(
-                            "127.0.0.1", port,
-                        )
-                    except OSError:
-                        await asyncio.sleep(.05)
-                    else:
-                        writer.close()
-                        await writer.wait_closed()
-                        break
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, str(ROOT / "mcp_tools_swebench.py"),
+            "--transport", "http", "--port", str(port),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            for _ in range(200):
+                try:
+                    _, writer = await asyncio.open_connection(
+                        "127.0.0.1", port,
+                    )
+                except OSError:
+                    await asyncio.sleep(.05)
                 else:
-                    self.fail("Docker HTTP server did not start")
-                await self.check_client(Client(f"http://127.0.0.1:{port}/mcp"))
-            finally:
-                process.terminate()
-                await asyncio.wait_for(process.wait(), 10)
+                    writer.close()
+                    await writer.wait_closed()
+                    break
+            else:
+                self.fail("Docker HTTP server did not start")
+            await self.check_client(Client(f"http://127.0.0.1:{port}/mcp"))
+        finally:
+            process.terminate()
+            await asyncio.wait_for(process.wait(), 10)
         after = await capture([
             "docker", "ps", "-aq", "--filter", "name=smith-swe-",
         ], 5, 4096)
         self.assertEqual(after.stdout, before.stdout)
 
     async def test_startup_failure_cleans_up(self) -> None:
-        broken_task = task_input()
-        broken_task.docker_image = "python:3.10-slim"
-        session = DockerSession(broken_task, SandboxConfig())
+        session = DockerSession(
+            "python:3.10-slim", EVAL_SCRIPT, SandboxConfig(),
+        )
         try:
             with self.assertRaises(ToolError):
                 await session.start()
