@@ -31,7 +31,8 @@ Pass `--sandbox-config` at startup to load trusted limits. See the
 
 ## SWE-bench
 
-The runtime API requires PR #19. The server starts with no task-file argument.
+The server starts with no task-file argument. See the [integration
+contract](integration.md) for the task setup call and result handling.
 
 1. Before `start_task`, file tools, `run_command` and `get_patch` use `TESTBED_PATH`.
 2. `start_task(docker_image, eval_script)` creates a private Docker workspace.

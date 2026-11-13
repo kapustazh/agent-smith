@@ -31,8 +31,8 @@ The result should contain `success=false`, `<test 1>` and `AssertionError`.
 
 ## Test SWE-bench
 
-This runtime API requires PR #19. Start Docker Desktop, then check the engine
-and build the small fixture containing a deliberately broken `add` function.
+Start Docker Desktop, then check the engine and build the small fixture
+containing a deliberately broken `add` function.
 
 ```bash
 docker info
@@ -105,6 +105,9 @@ For SWE-bench, use `mcp_tools_swebench.py`. Set the server environment variable
 Call `start_task` after connecting to use Docker.
 
 ## Connect the project sandbox
+
+See the [integration contract](integration.md) for task setup, result decoding
+and agent responsibilities.
 
 The sandbox requires Linux x86-64 with Landlock and seccomp. Pass the same
 configuration file to the sandbox and MCP server, then restart after changes.
