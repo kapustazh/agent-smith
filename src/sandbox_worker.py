@@ -246,12 +246,29 @@ def execute(code: str, namespace: dict) -> None:
         send({"type": "result", "status": "memory_limit",
               "error": "Sandbox memory limit exceeded. Worker terminated."})
         os._exit(137)
-    except SyntaxError:
-        send({"type": "result", "status": "syntax_error",
-              "error": traceback.format_exc()})
-    except Exception:
-        send({"type": "result", "status": "error",
-              "error": traceback.format_exc()})
+    except SyntaxError as exc:
+        send({
+            "type": "result",
+            "status": "syntax_error",
+            "error": (
+                f"SyntaxError: {exc.msg} "
+                f"(line {exc.lineno}, column {exc.offset})"
+            )
+        })
+    except Exception as exc:
+        tb = exc.__traceback__
+        while tb and tb.tb_next:
+            tb = tb.tb_next
+        line_nbr = tb.tb_lineno if tb else None
+
+        send({
+            "type": "result",
+            "status": "error",
+            "error": (
+                f"{type(exc).__name__}: {exc}"
+                f" (line {line_nbr})"
+            )
+        })
     else:
         send({"type": "result", "status": "success"})
 
