@@ -2,31 +2,25 @@ import asyncio
 import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any, AsyncIterator, Callable
+from typing import Annotated, Any, AsyncIterator, Callable, cast
 
 import typer
 from anyio import CancelScope
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
-from src.config_model import SandboxConfig, SWEBenchTaskInput
+from src.config_model import SandboxConfig
 from src.swebench_docker import DockerSession
 from src.swebench_tools import RepositoryTools
 
 
 class SWEBenchMCP:
-    def __init__(
-        self,
-        root: Path | None,
-        config: SandboxConfig,
-        task: SWEBenchTaskInput | None,
-    ) -> None:
-        self.session = (
-            DockerSession(task, config) if task is not None else None)
-        self.lock = self.session.lock if self.session else asyncio.Lock()
-        self.repository = (
-            self.session.repository if self.session else
-            RepositoryTools(root, config)
-        )
+    def __init__(self, root: Path | None, config: SandboxConfig) -> None:
+        self.config = config
+        self.fallback_root = root
+        self.session: DockerSession | None = None
+        self.lock = asyncio.Lock()
+        self.repository = RepositoryTools(root, config)
         self.server = FastMCP(
             "Agent Smith - SWE-bench", lifespan=self.lifespan)
         for method, description in (
@@ -47,7 +41,7 @@ class SWEBenchMCP:
         self.server.tool(
             self.run_command,
             description=(
-                "Run a container command and return output and exit code."),
+                "Run a shell command and return output and exit code."),
         )
         self.server.tool(
             self.run_tests,
@@ -66,6 +60,13 @@ class SWEBenchMCP:
                 "an incomplete patch."
             ),
         )
+        self.server.tool(
+            self.start_task,
+            description=(
+                "Replace the current container with docker_image "
+                "and eval_script."
+            ),
+        )
         self.server.resource(
             "agent://swebench/task",
             description=("Task metadata and execution configuration status."),
@@ -75,11 +76,13 @@ class SWEBenchMCP:
         )(self.swebench_solver)
 
     async def call_repository(
-        self,
-        method: Callable[..., str],
-        *args: Any,
+        self, method: str | Callable[..., str], *args: Any,
     ) -> str:
         async with self.lock:
+            if isinstance(method, str):
+                method = cast(
+                    Callable[..., str], getattr(self.repository, method),
+                )
             work = asyncio.create_task(asyncio.to_thread(method, *args))
             try:
                 return await asyncio.shield(work)
@@ -94,7 +97,7 @@ class SWEBenchMCP:
         end_line: int | None = None,
     ) -> str:
         return await self.call_repository(
-            self.repository.read_file, filepath, start_line, end_line
+            "read_file", filepath, start_line, end_line,
         )
 
     async def edit_file(
@@ -104,7 +107,7 @@ class SWEBenchMCP:
         new_str: str,
     ) -> str:
         return await self.call_repository(
-            self.repository.edit_file, filepath, old_str, new_str
+            "edit_file", filepath, old_str, new_str,
         )
 
     async def list_files(
@@ -112,13 +115,11 @@ class SWEBenchMCP:
         directory: str = ".",
         pattern: str = "*",
     ) -> str:
-        return await self.call_repository(
-            self.repository.list_files, directory, pattern
-        )
+        return await self.call_repository("list_files", directory, pattern)
 
     async def search_code(self, pattern: str, file_pattern: str = "*") -> str:
         return await self.call_repository(
-            self.repository.search_code, pattern, file_pattern
+            "search_code", pattern, file_pattern,
         )
 
     async def search_function_or_class_definition_in_code(
@@ -126,7 +127,7 @@ class SWEBenchMCP:
         name: str,
     ) -> str:
         return await self.call_repository(
-            self.repository.search_function_or_class_definition_in_code, name
+            "search_function_or_class_definition_in_code", name,
         )
 
     async def find_references(
@@ -136,69 +137,106 @@ class SWEBenchMCP:
         line: int,
     ) -> str:
         return await self.call_repository(
-            self.repository.find_references, name, filepath, line
+            "find_references", name, filepath, line,
         )
+
+    async def _close_session(self) -> None:
+        session = self.session
+        if session is None:
+            return
+        self.session = None
+        self.repository = RepositoryTools(self.fallback_root, self.config)
+        try:
+            with CancelScope(shield=True):
+                await asyncio.shield(session.close())
+        except Exception:
+            self.session = session
+            self.repository = session.repository
+            raise
+
+    async def _shutdown(self) -> None:
+        async with self.lock:
+            await self._close_session()
 
     @asynccontextmanager
     async def lifespan(self, server: FastMCP) -> AsyncIterator[dict[str, str]]:
         try:
-            if self.session is not None:
-                await self.session.start()
             yield {}
         finally:
-            if self.session is not None:
-                with CancelScope(shield=True):
-                    await asyncio.shield(self.session.close())
+            with CancelScope(shield=True):
+                await asyncio.shield(self._shutdown())
 
-    def execution(self) -> DockerSession:
-        if self.session is None:
+    async def start_task(self, docker_image: str, eval_script: str) -> str:
+        if not docker_image.strip() or "\x00" in docker_image:
             raise self.repository._error(
-                "Execution requires --task-file with docker_image and "
-                "eval_script. TESTBED_PATH configures repository tools only."
-            )
-        return self.session
+                "docker_image must be a non-empty image name.")
+        if not eval_script.strip() or "\x00" in eval_script:
+            raise self.repository._error(
+                "eval_script must be a non-empty shell script.")
+        async with self.lock:
+            await self._close_session()
+            session = DockerSession(docker_image, eval_script, self.config)
+            try:
+                await session.start()
+            except BaseException:
+                with CancelScope(shield=True):
+                    await asyncio.shield(session.close())
+                raise
+            self.session = session
+            self.repository = session.repository
+        return f"Started {docker_image} at /testbed."
 
     async def run_command(
         self,
         command: str,
         workdir: str = "/testbed",
     ) -> str:
-        return await self.execution().run_command(command, workdir)
+        async with self.lock:
+            if self.session is not None:
+                return await self.session.run_command(command, workdir)
+            raise self.repository._error("No Docker task is started.")
 
     async def run_tests(self) -> str:
-        return await self.execution().run_tests()
+        async with self.lock:
+            if self.session is None:
+                raise self.repository._error(
+                    "No task is started. Call start_task(docker_image, "
+                    "eval_script) before run_tests."
+                )
+            return await self.session.run_tests()
 
     async def get_patch(self) -> str:
-        return await self.execution().get_patch()
+        async with self.lock:
+            if self.session is not None:
+                return await self.session.get_patch()
+            raise self.repository._error("No Docker task is started.")
 
     def task_resource(self) -> dict[str, str]:
         if self.session is None:
-            return {
-                "execution": "requires --task-file",
-                "repository": str(self.repository.root),
-            }
+            try:
+                repository = str(self.repository.root)
+            except ToolError:
+                repository = ""
+            return {"execution": "idle", "repository": repository}
         return {
-            "instance_id": self.session.task.instance_id,
-            "problem_statement": self.session.task.problem_statement,
-            "repository": "/testbed",
+            "docker_image": self.session.docker_image,
+            "repository": self.session.workdir,
             "execution": "docker",
         }
 
     def swebench_solver(self) -> str:
         return (
-            "Inspect the task and repository. Edit the source, run_tests(), "
-            "read the test logs even when exit_code is zero, and get_patch(). "
-            "Pass that patch to the sandbox's final_answer(). Execution tools "
-            "require the server to be started with --task-file."
+            "Inspect the repository at /testbed. Edit the source, "
+            "run_tests(), read the logs even when exit_code is zero, "
+            "and get_patch(). Pass that patch to final_answer()."
         )
 
 
 def create_server(
     root: Path | None = None,
     config: SandboxConfig | None = None,
-    task: SWEBenchTaskInput | None = None,
 ) -> FastMCP:
-    return SWEBenchMCP(root, config or SandboxConfig(), task).server
+    return SWEBenchMCP(root, config or SandboxConfig()).server
 
 
 mcp = create_server()
@@ -211,15 +249,6 @@ def main(
         Path | None,
         typer.Option(
             "--sandbox-config",
-            exists=True,
-            dir_okay=False,
-            readable=True,
-        ),
-    ] = None,
-    task_file: Annotated[
-        Path | None,
-        typer.Option(
-            "--task-file",
             exists=True,
             dir_okay=False,
             readable=True,
@@ -239,13 +268,7 @@ def main(
             raise typer.BadParameter(
                 f"Cannot load sandbox configuration: {error}",
             ) from None
-    task = None
-    if task_file is not None:
-        try:
-            task = SWEBenchTaskInput.model_validate_json(task_file.read_text())
-        except (OSError, ValueError) as error:
-            raise typer.BadParameter(f"Cannot load SWE-bench task: {error}")
-    server = create_server(config=policy, task=task)
+    server = create_server(config=policy)
 
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     if transport == "http":
