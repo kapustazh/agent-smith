@@ -1,5 +1,8 @@
 import asyncio
 import sys
+import tempfile
+import time
+from pathlib import Path
 import unittest
 from typing import Any
 from unittest.mock import patch
@@ -8,6 +11,31 @@ from src.docker_process import capture, start_process
 
 
 class ProcessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_timeout_kills_shell_children(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "survived"
+            started = time.monotonic()
+            result = await capture([
+                "/bin/bash", "-c", f"(sleep 1; touch '{marker}') & wait",
+            ], .1, 100)
+            self.assertTrue(result.timed_out)
+            self.assertLess(time.monotonic() - started, .8)
+            await asyncio.sleep(1.1)
+            self.assertFalse(marker.exists())
+
+    async def test_cancellation_kills_shell_children(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "survived"
+            pending = asyncio.create_task(capture([
+                "/bin/bash", "-c", f"(sleep 1; touch '{marker}') & wait",
+            ], 10, 100))
+            await asyncio.sleep(.1)
+            pending.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(pending, .8)
+            await asyncio.sleep(1.1)
+            self.assertFalse(marker.exists())
+
     async def delayed_spawn(
         self, *args: Any, **kwargs: Any,
     ) -> asyncio.subprocess.Process:
