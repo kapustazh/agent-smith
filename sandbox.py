@@ -147,7 +147,9 @@ def build_mcp_aliases(
     aliases: dict[str, str] = {}
 
     for number, name in enumerate(sorted(registry), start=1):
-        if (
+        if name == RESERVED_TOOL and "start_task" not in registry:
+            alias = "start_task"
+        elif (
             name.isidentifier()
             and not keyword.iskeyword(name)
             and not name.startswith("_")

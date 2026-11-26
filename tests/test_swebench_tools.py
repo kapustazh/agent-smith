@@ -16,6 +16,7 @@ from fastmcp.client.transports import StdioTransport
 from fastmcp.exceptions import ToolError
 from mcp.types import TextContent, TextResourceContents
 from mcp_tools_swebench import SWEBenchMCP, create_server
+from sandbox import RESERVED_TOOL, build_mcp_aliases, manual
 from src.config_model import SandboxConfig
 from src.swebench_docker import DockerSession
 from src.swebench_tools import RepositoryTools
@@ -335,16 +336,20 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                 "read_file", "edit_file", "list_files", "search_code",
                 "search_function_or_class_definition_in_code",
                 "find_references",
-                "run_command", "run_tests", "get_patch", "start_task",
+                "run_command", "run_tests", "get_patch", RESERVED_TOOL,
             })
             self.assertEqual(
                 set(tools["run_command"].input_schema["required"]),
                 {"command"},
             )
             self.assertEqual(
-                set(tools["start_task"].input_schema["required"]),
+                set(tools[RESERVED_TOOL].input_schema["required"]),
                 {"docker_image", "eval_script"},
             )
+            aliases = build_mcp_aliases(tools)
+            self.assertEqual(aliases["start_task"], RESERVED_TOOL)
+            self.assertNotIn("start_task", manual(
+                list(tools.values()), aliases))
             resources = await client.list_resources()
             read = await client.read_resource(str(resources[0].uri))
             resource = read[0]
@@ -373,7 +378,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             assert isinstance(regex_text, TextContent)
             self.assertIn("noise.py:1 sum = 1", regex_text.text)
             blank = await client.call_tool(
-                "start_task",
+                RESERVED_TOOL,
                 {"docker_image": " ", "eval_script": "echo ok"},
                 raise_on_error=False,
             )

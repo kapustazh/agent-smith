@@ -80,3 +80,17 @@ class ConnectorTests(unittest.TestCase):
             f" print({payload!r})\n",
         )
         self.assertTrue(client.run_tool("start_task()", max_sec=1).success)
+
+    def test_default_wait_allows_docker_preparation(self) -> None:
+        payload = json.dumps({"success": True, "tool_name": "run_tests",
+                              "sandbox_output": "evaluation complete"})
+        client = self.client(
+            "for line in sys.stdin:\n"
+            " if line.strip() != '<<<END_COMMAND>>>': continue\n"
+            f" print({payload!r})\n",
+        )
+        with patch("src.sandbox_connector.monotonic",
+                   side_effect=[0, *[15] * 10]):
+            result = client.run_tool("print(run_tests())")
+        self.assertTrue(result.success, result)
+        self.assertIsNone(client.process.poll())
