@@ -175,7 +175,8 @@ class DockerTests(unittest.IsolatedAsyncioTestCase):
 class DockerMCPTests(unittest.IsolatedAsyncioTestCase):
     async def check_client(self, client: Client) -> None:
         async with client:
-            started = await client.call_tool("start_task", {
+            startup_tool = "start_task_not_a_tool_for_manual"
+            started = await client.call_tool(startup_tool, {
                 "docker_image": IMAGE, "eval_script": EVAL_SCRIPT,
             })
             started_text = started.content[0]
@@ -183,7 +184,7 @@ class DockerMCPTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(IMAGE, started_text.text)
             tools = await client.list_tools()
             self.assertEqual(len(tools), 10)
-            self.assertIn("start_task", {tool.name for tool in tools})
+            self.assertIn(startup_tool, {tool.name for tool in tools})
             self.assertTrue(all(tool.description for tool in tools))
             response = await client.call_tool("read_file", {
                 "filepath": "/testbed/calc.py", "start_line": 1, "end_line": 2,

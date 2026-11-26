@@ -395,9 +395,10 @@ def main(
         print("-"*10, " Sandbox tools:\n", sandbox_tools_list, "\n")
 
     # Start Docker !!!!!!!
-    if "start_task" not in sandbox_tools_list:
+    startup_tool = "start_task_not_a_tool_for_manual"
+    if startup_tool not in sandbox_tools_list:
         typer.secho(
-            "Error: Can`t work without start_task() tools'!\n",
+            f"Error: SWE-bench MCP is missing {startup_tool}().",
             fg=typer.colors.RED, err=True)
         sandbox.close()
         typer.Exit(code=1)
@@ -405,7 +406,7 @@ def main(
 
     try:
         start_res = sandbox.run_tool(
-            "print(start_task("
+            f"print({startup_tool}("
             f"docker_image={repr(the_task.docker_image)}, "
             f"eval_script={repr(the_task.eval_script)}"
             "))",

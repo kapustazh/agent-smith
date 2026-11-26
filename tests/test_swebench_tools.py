@@ -329,20 +329,22 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             timer.join()
 
     async def check_client(self, client: Client) -> None:
+        startup_tool = "start_task_not_a_tool_for_manual"
         async with client:
             tools = {tool.name: tool for tool in await client.list_tools()}
             self.assertEqual(set(tools), {
                 "read_file", "edit_file", "list_files", "search_code",
                 "search_function_or_class_definition_in_code",
                 "find_references",
-                "run_command", "run_tests", "get_patch", "start_task",
+                "run_command", "run_tests", "get_patch",
+                startup_tool,
             })
             self.assertEqual(
                 set(tools["run_command"].input_schema["required"]),
                 {"command"},
             )
             self.assertEqual(
-                set(tools["start_task"].input_schema["required"]),
+                set(tools[startup_tool].input_schema["required"]),
                 {"docker_image", "eval_script"},
             )
             resources = await client.list_resources()
@@ -373,7 +375,7 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             assert isinstance(regex_text, TextContent)
             self.assertIn("noise.py:1 sum = 1", regex_text.text)
             blank = await client.call_tool(
-                "start_task",
+                startup_tool,
                 {"docker_image": " ", "eval_script": "echo ok"},
                 raise_on_error=False,
             )
