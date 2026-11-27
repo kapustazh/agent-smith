@@ -258,7 +258,12 @@ class RepositoryTools:
     def _search_matches(
         self, expression: regex.Pattern, file_pattern: str, deadline: float,
     ) -> Iterator[str]:
-        for path in self._files(".", file_pattern):
+        paths = (
+            (self._relative(file_pattern),)
+            if Path(file_pattern).is_absolute()
+            else self._files(".", file_pattern)
+        )
+        for path in paths:
             with self._file(path) as handle:
                 try:
                     for number, line in enumerate(handle, 1):

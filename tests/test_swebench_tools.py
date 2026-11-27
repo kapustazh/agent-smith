@@ -143,6 +143,20 @@ class RepositoryCase(unittest.TestCase):
             self.tools.search_code("sum([N.x", "vector.py"),
         )
 
+    def test_search_absolute_path_targets_only_that_file(self) -> None:
+        self.tools.visible_root = Path("/testbed")
+        duplicate = self.repo / "other"
+        duplicate.mkdir()
+        (duplicate / "module.py").write_text(SOURCE)
+        self.assertEqual(
+            self.tools.search_code("def solve(value)", "/testbed/module.py"),
+            "/testbed/module.py:1 def solve(value):",
+        )
+        for path in ("/testbed-other/module.py", "/testbed/../module.py",
+                     "/testbed/.git/config"):
+            with self.subTest(path=path), self.assertRaises(ToolError):
+                self.tools.search_code("def solve", path)
+
     def test_blank_directory_lists_task_root(self) -> None:
         for directory in ("", " ", "."):
             self.assertEqual(self.tools.list_files(directory, "*.py"),
