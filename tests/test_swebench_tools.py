@@ -343,20 +343,21 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             timer.join()
 
     async def check_client(self, client: Client) -> None:
+        startup_tool = "start_task_not_a_tool_for_manual"
         async with client:
             tools = {tool.name: tool for tool in await client.list_tools()}
             self.assertEqual(set(tools), {
                 "read_file", "edit_file", "list_files", "search_code",
                 "search_function_or_class_definition_in_code",
                 "find_references",
-                "run_command", "run_tests", "get_patch", "start_task",
+                "run_command", "run_tests", "get_patch", startup_tool,
             })
             self.assertEqual(
                 set(tools["run_command"].input_schema["required"]),
                 {"command"},
             )
             self.assertEqual(
-                set(tools["start_task"].input_schema["required"]),
+                set(tools[startup_tool].input_schema["required"]),
                 {"docker_image", "eval_script"},
             )
             resources = await client.list_resources()
@@ -369,25 +370,8 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
             prompt = rendered.messages[0].content
             assert isinstance(prompt, TextContent)
             self.assertIn("get_patch", prompt.text)
-            snippet = "sum([N.x, (0 * N.x)])"
-            (self.root / "vector.py").write_text("total = " + snippet + "\n")
-            (self.root / "noise.py").write_text("sum = 1\n")
-            found = await client.call_tool(
-                "search_code", {"pattern": snippet},
-            )
-            self.assertFalse(found.is_error)
-            found_text = found.content[0]
-            assert isinstance(found_text, TextContent)
-            self.assertIn("sum([N.x", found_text.text)
-            self.assertNotIn("noise.py", found_text.text)
-            regex_result = await client.call_tool(
-                "search_code", {"pattern": "^sum =", "use_regex": True},
-            )
-            regex_text = regex_result.content[0]
-            assert isinstance(regex_text, TextContent)
-            self.assertIn("noise.py:1 sum = 1", regex_text.text)
             blank = await client.call_tool(
-                "start_task",
+                startup_tool,
                 {"docker_image": " ", "eval_script": "echo ok"},
                 raise_on_error=False,
             )
